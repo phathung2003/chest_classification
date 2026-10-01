@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Pre-process Dataset
+/dataset/**
+/original_dataset/NIH ChestX-Ray14/**
