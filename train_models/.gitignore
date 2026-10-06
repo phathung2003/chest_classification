@@ -219,4 +219,4 @@ __marimo__/
 
 # Pre-process Dataset
 /dataset/**
-/original_dataset/NIH ChestX-Ray14/**
+/original_dataset/NIH_ChestXRay14/**
