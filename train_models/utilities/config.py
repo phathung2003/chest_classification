@@ -1,7 +1,7 @@
 from pathlib import Path
 
 # Đường dẫn
-ROOT_DIRECTORY              = (Path.cwd().parent).resolve()
+ROOT_DIRECTORY              = (Path.cwd().parent / "chest_classification" / "train_models").resolve()
 ORIGINAL_DATASET_DIRECTORY  = (ROOT_DIRECTORY / "original_dataset").resolve()
 DATASET_DIRECTORY           = (ROOT_DIRECTORY / "dataset").resolve()
 
