@@ -1,0 +1,15 @@
+{
+    "model": "DenseNet121 + Mamba",
+    "image_size": 224,
+    "number_of_folds": 5,
+    "random_seed": 42,
+    "mamba_dim": 256,
+    "mamba_layers": 2,
+    "test_loss": 1.5473005235763355,
+    "test_macro_auroc": 0.793201194918735,
+    "test_macro_precision": 0.14715076515458694,
+    "test_macro_recall": 0.7843316759164576,
+    "test_macro_f1": 0.23968368845099988,
+    "test_micro_f1": 0.27600376469430316,
+    "test_weighted_f1": 0.3291853082106523
+}
