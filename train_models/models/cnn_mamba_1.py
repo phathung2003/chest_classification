@@ -1,27 +1,9 @@
-# ============================================================
-# CNN + MAMBA
-# NIH ChestX-Ray14
-# 5-Fold Cross Validation + Final Test
-#
-# Windows native:
-# pip install mambapy
-# ============================================================
+# Khai báo utilities
 import sys
 from pathlib import Path
-TRAIN_MODELS_DIRECTORY = (
-    Path(__file__)
-    .resolve()
-    .parents[1]
-)
+if str(Path(__file__).resolve().parents[1]) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-
-if str(TRAIN_MODELS_DIRECTORY) not in sys.path:
-
-    sys.path.insert(
-        0,
-        str(TRAIN_MODELS_DIRECTORY)
-    )
-    
 import json
 import random
 import time
