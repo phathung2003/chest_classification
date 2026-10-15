@@ -58,7 +58,7 @@ if str(Path.cwd().parent) not in sys.path:
     )
 
 
-from utilities.config import (
+from config import (
     ROOT_DIRECTORY,
     DATASET_DIRECTORY,
     IMAGE_SIZE,

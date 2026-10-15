@@ -8,8 +8,8 @@ import os
 import torch
 import random
 import numpy as np
-from utilities.notice import print_heading, print_message
-from utilities.config import NUMBER_OF_FOLDS, TRAIN_ALL_FOLD, SELECTED_FOLD
+from utilities.log import print_heading, print_message
+from config import NUMBER_OF_FOLDS, TRAIN_ALL_FOLD, SELECTED_FOLD
 
 def device_info():
     
@@ -19,7 +19,7 @@ def device_info():
     )
     
     print_heading("Cấu hình huấn luyện")
-    print_message("Huấn luyện trên", "GPU CUDA" if DEVICE == "cuda" else "CPU")
+    print_message("Huấn luyện trên", "GPU CUDA" if DEVICE.type == "cuda" else "CPU")
 
 
     if DEVICE.type == "cuda":

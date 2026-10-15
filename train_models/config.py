@@ -1,7 +1,7 @@
 from pathlib import Path
 
 # Đường dẫn
-ROOT_DIRECTORY              = Path(__file__).resolve().parents[1]                                       # Đường dẫn thư mục huấn luyện mô hình
+ROOT_DIRECTORY              = Path(__file__).resolve().parents[0]                                       # Đường dẫn thư mục huấn luyện mô hình
 
 ORIGINAL_DATASET_DIRECTORY  = (ROOT_DIRECTORY / "original_dataset").resolve()                           # Tập dữ liệu ban đầu
 
