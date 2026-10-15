@@ -13,17 +13,18 @@ import torch.nn.functional as F
 from torchvision.models import densenet121, DenseNet121_Weights
 from mambapy.mamba import Mamba, MambaConfig
 
-from utilities.config import TRAIN_FOLDS_DIRECTORY, TEST_DIRECTORY, DATASET_INFO_DIRECTORY, MODELS_OUTPUT_DIRECTORY
+from config import TRAIN_FOLDS_DIRECTORY, TEST_DIRECTORY, DATASET_INFO_DIRECTORY, MODELS_OUTPUT_DIRECTORY
 from utilities.setting import device_info, set_seed, set_fold
 from utilities.check import check_file_directory, check_dataset
-from utilities.models import dataset_info, transform_setting, run_experiment
+from utilities.models import run_experiment
+from utilities.data import dataset_info , transform_setting
 from utilities.other import to_snake_case
 from utilities.dataset import NIHChestXrayDataset
 
 # ============================================================
 # 5. MODEL SETTINGS
 # ============================================================
-MODEL_NAME = "CNN Mamba v1"
+MODEL_NAME = "CNN Mamba v1.1"
 MAMBA_DIM = 256
 MAMBA_LAYERS = 2
 DROPOUT = 0.20
