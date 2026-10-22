@@ -5,79 +5,23 @@ if str(Path(__file__).resolve().parents[1]) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # Khai báo thư viện
-import json
-
 import torch.nn as nn
 import torch.nn.functional as F
 
 from torchvision.models import densenet121, DenseNet121_Weights
 from mambapy.mamba import Mamba, MambaConfig
 
-from config import TRAIN_FOLDS_DIRECTORY, TEST_DIRECTORY, DATASET_INFO_DIRECTORY, MODELS_OUTPUT_DIRECTORY
-from utilities.setting import device_info, set_seed, set_fold
-from utilities.check import check_file_directory, check_dataset
-from utilities.models import run_experiment
-from utilities.data import dataset_info , transform_setting
-from utilities.other import to_snake_case
+from training.models import run_experiment
 from utilities.dataset import NIHChestXrayDataset
 
 # ============================================================
-# 5. MODEL SETTINGS
-# ============================================================
-MODEL_NAME = "CNN Mamba v1.1"
+# MODEL SETTINGS
+MODEL_NAME = "CNN Mamba"
 MAMBA_DIM = 256
 MAMBA_LAYERS = 2
 DROPOUT = 0.20
 PRETRAINED_CNN = True
 dataset_class = NIHChestXrayDataset
-
-def setup():
-    # ============================================================
-    # Kiểm tra đường dẫn trong tập dữ liệu
-    required_files = [TRAIN_FOLDS_DIRECTORY, TEST_DIRECTORY, DATASET_INFO_DIRECTORY]
-    check_file_directory(required_files)
-
-    # ============================================================
-    # Đọc thông tin tập dữ liệu
-    with open(DATASET_INFO_DIRECTORY, "r", encoding="utf-8") as file:
-        dataset_config = json.load(file)
-
-    # ============================================================
-    # Thông tin thiết bị huấn luyện
-    DEVICE = device_info()
-
-    # ============================================================
-    # Thiết lập seed
-    set_seed(dataset_config["seed"])
-
-    # ============================================================
-    # Làm giàu ảnh
-    train_transform, test_transform = transform_setting()
-    
-    # ============================================================
-    # Thông tin tập dữ liệu
-    train_folds_df, test_df, DATASET_NAME, CLASSES, NUMBER_OF_CLASSES, NUMBER_OF_FOLDS = dataset_info(dataset_config)
-    check_dataset(CLASSES, train_folds_df, test_df)
-
-    FOLD_TRAIN = set_fold(NUMBER_OF_FOLDS)
-    OUTPUT_DIRECTORY = (MODELS_OUTPUT_DIRECTORY / to_snake_case(DATASET_NAME) / to_snake_case(MODEL_NAME))
-    OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
-
-    run_experiment(
-        DEVICE = DEVICE, 
-        CLASSES = CLASSES, 
-        dataset_class = NIHChestXrayDataset, 
-        FOLD_TRAIN = FOLD_TRAIN, 
-        OUTPUT_DIRECTORY = OUTPUT_DIRECTORY, 
-        train_folds_df = train_folds_df, 
-        test_df = test_df, 
-        model_factory=CNNMamba,
-        train_transform = train_transform,
-        test_transform = test_transform,
-        model_kwargs={
-
-        }
-    )
 
 # ============================================================
 # Mô hình: CNN + MAMBA MODEL
@@ -145,9 +89,10 @@ class CNNMamba(nn.Module):
         
         return logits
 
-
-
-
 if __name__ == "__main__":
-    setup()
-
+    run_experiment(
+        model_name      = MODEL_NAME,
+        dataset_class   = NIHChestXrayDataset, 
+        model_factory   = CNNMamba,
+        model_kwargs    = {}
+    )

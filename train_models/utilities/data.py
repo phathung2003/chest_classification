@@ -1,89 +1,74 @@
-# Khai báo utilities
-import sys
-from pathlib import Path
-if str(Path(__file__).resolve().parents[1]) not in sys.path:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import torch
+import random
 import numpy as np
 import pandas as pd
-import config as config
+import torch
 from torchvision import transforms
 from torch.utils.data import DataLoader
+import config
+from utilities.runtime import runtime
 from utilities.log import print_heading, print_message
 
-# ============================================================
-# Thông tin tập dữ liệu
+
 def dataset_info(dataset_config):
-    DATASET_NAME        = dataset_config["dataset_name"]
-    CLASSES             = dataset_config["classes"]
-    NUMBER_OF_CLASSES   = len(CLASSES)
-    NUMBER_OF_FOLDS     = dataset_config["number_of_folds"]
-    
-    train_folds_df = pd.read_csv(config.TRAIN_FOLDS_DIRECTORY)
+    name = dataset_config['dataset_name']
+    classes = list(dataset_config['classes'])
+    nfolds = int(dataset_config['number_of_folds'])
+    train_df = pd.read_csv(config.TRAIN_FOLDS_DIRECTORY)
     test_df = pd.read_csv(config.TEST_DIRECTORY)
     
-    print_heading("Thông tin tập dữ liệu")
-    print_message("Tên tập dữ liệu"             , DATASET_NAME)
-    print_message("Số ảnh tập huấn luyện"       , f"{len(train_folds_df):,} ảnh")
-    print_message("Số ảnh tập kiểm tra"         , f"{len(test_df):,} ảnh")
-    print_message("Kích cỡ ảnh"                 , f"{dataset_config['image_size']} x {dataset_config['image_size']}")
-    print_message("Số phần được chia"           , NUMBER_OF_FOLDS)
-    print_message("Số lớp"                      , NUMBER_OF_CLASSES)
-    
-    print("Các lớp trong tập dữ liệu")
-    for index, class_name in enumerate(CLASSES, start=1):
-        print( f"{index:>2}. "f"{class_name}")
-    
-    return train_folds_df, test_df, DATASET_NAME, CLASSES, NUMBER_OF_CLASSES, NUMBER_OF_FOLDS
+    runtime.TRAIN_DF = train_df
+    runtime.TEST_DF = test_df
+    runtime.DATASET_NAME = name
+    runtime.CLASSES = classes
+    runtime.NUMBER_OF_FOLDS = nfolds
+    return train_df, test_df, name, classes, nfolds
 
-# ============================================================
-# Cấu hình làm giàu ảnh
+
 def transform_setting():
     train_transform = transforms.Compose([
-
-    transforms.RandomAffine(degrees = config.DERGEES, translate = config.TRANSLATE, scale = config.SCALE),
+        transforms.RandomAffine(degrees=runtime.DERGEES,
+                                translate=runtime.TRANSLATE, scale=runtime.SCALE),
         transforms.ToTensor(),
-        transforms.Normalize(mean = config.TRANSFORM_NORMALIZE_MEAN, std = config.TRANSFORM_NORMALIZE_STD),
+        transforms.Normalize(mean=runtime.TRANSFORM_NORMALIZE_MEAN,
+                             std=runtime.TRANSFORM_NORMALIZE_STD),
     ])
-    
     eval_transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize(mean = config.TRANSFORM_NORMALIZE_MEAN, std = config.TRANSFORM_NORMALIZE_STD),
+        transforms.Normalize(mean=runtime.TRANSFORM_NORMALIZE_MEAN,
+                             std=runtime.TRANSFORM_NORMALIZE_STD),
     ])
-    
     return train_transform, eval_transform
 
-# ============================================================
-# Dataloader
-def create_dataloader(dataset_class, CLASSES, DEVICE, dataframe, transform, shuffle):
-    dataset = dataset_class(dataframe=dataframe, classes=CLASSES, transform=transform,)
 
+def _seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
+def create_dataloader(dataset_class, classes, device, dataframe, transform, shuffle,
+                      *, seed=None):
+    dataset = dataset_class(dataframe=dataframe, classes=classes, transform=transform)
+    generator = torch.Generator()
+    generator.manual_seed(int(runtime.SEED if seed is None else seed))
+    workers = int(runtime.NUMBBER_OF_WORKERS)
     loader = DataLoader(
-        dataset,
-        batch_size      = config.BATCH_SIZE,
-        shuffle         = shuffle,
-        num_workers     = config.NUMBBER_OF_WORKERS,
-        prefetch_factor = 2 if config.NUMBBER_OF_WORKERS > 0 else None,
-        pin_memory      = (DEVICE.type == "cuda"),
-        drop_last=False,
+        dataset, batch_size=int(runtime.BATCH_SIZE), shuffle=shuffle,
+        num_workers=workers, prefetch_factor=2 if workers > 0 else None,
+        pin_memory=(device.type == 'cuda'), drop_last=False,
+        worker_init_fn=_seed_worker, generator=generator,
+        persistent_workers=False,
     )
+    return dataset, loader
 
-    return (dataset, loader)
 
-# ============================================================
-# Pos Weight
-def pos_weight(fold, DEVICE):
-    
-    if fold == 0:
-        path = (config.DATASET_DIRECTORY / "pos_weight.npy").resolve()
-    else:
-        path = (config.FOLDS_DIRECTORY / f"fold_{fold}" / "pos_weight.npy").resolve()
-    
-    # Kiểm tra tệp tin 
+def pos_weight(fold, device):
+    path = (config.DATASET_DIRECTORY / 'pos_weight.npy' if int(fold) == 0
+            else config.FOLDS_DIRECTORY / f'fold_{fold}' / 'pos_weight.npy')
     if not path.is_file():
-        raise FileNotFoundError(f"Không tìm thấy file: {path}")
-    
+        raise FileNotFoundError(f'Missing pos_weight: {path}')
     weights = np.load(path, allow_pickle=False)
-    
-    return torch.tensor(weights, dtype=torch.float32, device=DEVICE)
+    if weights.ndim != 1 or not np.all(np.isfinite(weights)) or np.any(weights < 0):
+        raise ValueError(f'Invalid pos_weight values in {path}')
+    return torch.as_tensor(weights, dtype=torch.float32, device=device)
