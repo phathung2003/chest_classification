@@ -1,0 +1,78 @@
+import json
+import numpy as np
+import config
+from utilities.runtime import runtime
+from utilities.data import dataset_info, transform_setting
+from utilities.setting import device_info, set_seed, set_fold
+from utilities.check import check_file_directory, validate_data
+from utilities.other import to_snake_case
+from utilities.log import capture_run_log
+from training.checkpoint import save_json, read_json, choose_run
+from training.train import train_one_fold, train_final_model, cleanup
+from training.evaluate import evaluate_test
+from utilities.hash import make_signature
+from training.evaluate import cross_validation
+
+def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_factory = None):
+    
+    # Kiểm tra đường dẫn
+    required = [config.TRAIN_FOLDS_DIRECTORY, config.TEST_DIRECTORY, config.DATASET_INFO_DIRECTORY]
+    check_file_directory(required)
+    
+    # Đọc thông tin tập dữ liệu
+    with open(config.DATASET_INFO_DIRECTORY, 'r', encoding='utf-8') as f:
+        dataset_config = json.load(f)
+    
+    # Lấy tập dữ liệu
+    train_df, test_df, dataset_name, classes, number_of_folds = dataset_info(dataset_config)
+    validate_data(train_df, test_df, classes, number_of_folds)
+    
+    # Cấu hình Fold
+    folds = set_fold(number_of_folds)
+    complete_selection = sorted(folds) == list(range(1, number_of_folds + 1))
+    include_final = bool(getattr(config, 'TRAIN_FINAL_MODEL', True)) and complete_selection
+    
+    # Tạo chữ ký
+    signature, settings = make_signature(model_name, dataset_name, train_df, test_df, classes, folds, number_of_folds, model_factory, dataset_class, model_kwargs, loss_factory, include_final)
+    
+    # Đường dẫn lưu lần chạy
+    root = (config.MODELS_OUTPUT_DIRECTORY / to_snake_case(dataset_name) / to_snake_case(model_name))
+    output_directory = choose_run(root, signature, bool(getattr(config, 'RESUME_TRAINING', True)), settings)
+    
+    # Ghi log
+    with capture_run_log(output_directory, model_name = model_name, dataset_name = dataset_name, train_df = train_df, test_df = test_df, folds = folds, include_final = include_final, settings = settings):
+        runtime.MODEL_NAME = model_name
+        runtime.DATASET_NAME = dataset_name
+        runtime.RUN_NO = int(output_directory.name[4:])
+        runtime.REMAINING_FOLD = list(folds)
+        device = device_info()
+        train_transform, eval_transform = transform_setting()
+        results = []
+        set_seed(int(runtime.SEED))
+        
+        # Bắt đầu huấn luyện từng Fold
+        for fold in folds:
+            result = train_one_fold(output_directory, fold, train_transform, eval_transform, dataset_class, train_df, classes, model_factory, model_kwargs, device, signature, model_name, loss_factory)
+            results.append(result)
+        frame, all_done = cross_validation(output_directory, results, folds, number_of_folds)
+        
+        # Huấn luyện lần cuối
+        if include_final and all_done:
+            if (output_directory / 'test_summary.json').exists():
+                print('Đã hoàn tất đánh giá trên tập Test độc lập. Bỏ qua đánh giá lại.')
+            else:
+                median_epoch = max(1, int(np.median(frame['best_epoch'].to_numpy(dtype=int))))
+                model, criterion = train_final_model(
+                    output_directory, dataset_class, train_df, classes, train_transform,
+                    model_factory, model_kwargs, device, median_epoch, signature,
+                    model_name, loss_factory)
+                evaluate_test(output_directory, dataset_class, model, criterion,
+                              test_df, classes, eval_transform, device)
+                del model, criterion
+                cleanup()
+        info = read_json(output_directory / 'train_info.json')
+        info['train_completed'] = True
+        info['folds_completed'] = sorted(folds)
+        info['final_test_completed'] = (output_directory / 'test_summary.json').exists()
+        save_json(output_directory / 'train_info.json', info)
+        return frame
