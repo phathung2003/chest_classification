@@ -4,8 +4,11 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+import os
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 # Khai báo thư viện
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -17,16 +20,15 @@ from utilities.dataset import NIHChestXrayDataset
 
 # ============================================================
 # MODEL SETTINGS
-MODEL_NAME = "CNN Mamba_v1.1"
+MODEL_NAME = "CNN Mamba_v1.2"
 MAMBA_DIM = 256
 MAMBA_LAYERS = 2
-DROPOUT = 0.20
+DROPOUT = 0.35
 PRETRAINED_CNN = True
 dataset_class = NIHChestXrayDataset
 
 # ============================================================
 # Mô hình: CNN + MAMBA MODEL
-
 class CNNMamba(nn.Module):
 
     def __init__(self, num_classes):
@@ -60,7 +62,7 @@ class CNNMamba(nn.Module):
         
         # Classifier
         self.dropout = nn.Dropout(DROPOUT)
-        self.classifier = nn.Linear(MAMBA_DIM, num_classes)
+        self.classifier = nn.Linear(MAMBA_DIM * 2, num_classes)
 
     def forward(self, x):
         
@@ -82,7 +84,10 @@ class CNNMamba(nn.Module):
         x = self.final_norm(x)
 
         # Sequence pooling (Expected: [B, 256])
-        x = x.mean(dim=1)
+        avg_pool = x.mean(dim=1)
+        max_pool = x.amax(dim=1)
+
+        x = torch.cat([avg_pool, max_pool], dim=1,)
         
         # Classification
         x = self.dropout(x)
@@ -91,9 +96,10 @@ class CNNMamba(nn.Module):
         return logits
 
 LOSS_CONFIG = {
-    "name": "bce",
-    "pos_weight_alpha": 1.0,
-    "max_pos_weight": None,
+    "name": "asl",
+    "gamma_neg": 4.0,
+    "gamma_pos": 0.0,
+    "clip": 0.05,
 }
 
 if __name__ == "__main__":

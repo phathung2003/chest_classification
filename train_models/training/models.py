@@ -7,7 +7,7 @@ from utilities.data import dataset_info, transform_setting
 from utilities.setting import device_info, set_seed, set_fold
 from utilities.check import check_file_directory, validate_data
 from utilities.other import to_snake_case
-from utilities.log import capture_run_log
+from utilities.log import capture_run_log, model_specification
 from training.checkpoint import save_json, read_json, choose_run
 from training.train import train_one_fold, train_final_model, cleanup
 from training.evaluate import evaluate_test
@@ -51,6 +51,7 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_
         runtime.RUN_NO = int(output_directory.name[4:])
         runtime.REMAINING_FOLD = list(folds)
         device = device_info()
+        model_specification(model_factory, classes, device, model_kwargs)
         train_transform, eval_transform = transform_setting()
         results = []
         set_seed(int(runtime.SEED))

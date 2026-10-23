@@ -12,8 +12,7 @@ def device_info():
     print_message('Huấn luyện trên', 'GPU CUDA' if device.type == 'cuda' else 'CPU')
     if device.type == 'cuda':
         print_message('GPU sử dụng', torch.cuda.get_device_name(0))
-        print_message('VRAM GPU', f'{torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB')
-    print('\n')
+        print_message('VRAM GPU', f'{torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB\n')
     return device
 
 
