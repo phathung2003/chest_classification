@@ -3,6 +3,7 @@
 
 ## Commit Message
 feature: thêm tính năng mới.
+improve: cải thiện mô hình
 fix: sửa lỗi.
 refactor: chỉnh cấu trúc code nhưng không thêm tính năng/sửa bug.
 docs: sửa tài liệu.

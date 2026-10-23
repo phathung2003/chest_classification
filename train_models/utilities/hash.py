@@ -70,7 +70,7 @@ def pos_weight_hash(folds, include_final):
 
 # ============================================================
 # Tạo chữ ký
-def make_signature(model_name, dataset_name, train_df, test_df, classes, folds, number_of_folds, model_factory, dataset_class, model_kwargs, loss_factory, include_final):
+def make_signature(model_name, dataset_name, train_df, test_df, classes, folds, number_of_folds, model_factory, dataset_class, model_kwargs, loss_factory, include_final, *, loss_config=None):
     settings = {
         # Thông tin về model
         'model_name'                : model_name, 
@@ -81,15 +81,18 @@ def make_signature(model_name, dataset_name, train_df, test_df, classes, folds, 
         'dataset_name'              : dataset_name,
         'classes'                   : classes, 
         'number_of_folds'           : number_of_folds,
-        'pos_weights'               : pos_weight_hash(folds, include_final),
+        'pos_weights'               : pos_weight_hash(list(range(1, number_of_folds + 1)), include_final) if loss_factory is not None else None,
         'dataset_source_hash'       : source_hash(dataset_class),
         'train_df_hash'             : data_hash(train_df),
         'test_df_hash'              : data_hash(test_df),
         
         # Thông tin về quá trình huấn luyện
         'folds'                     : folds, 
-        'loss_name'                 : ('BCEWithLogitsLoss' if loss_factory is None else f'{loss_factory.__module__}.{loss_factory.__qualname__}'),
-        'loss_source_hash'          : 'builtin' if loss_factory is None else source_hash(loss_factory),
+        'loss_name'                 : str(loss_config['name']).lower() if loss_factory is None else f'{loss_factory.__module__}.{loss_factory.__qualname__}',
+        'loss_source_hash'          : file_hash(Path(__file__).resolve().parents[1] / "training" / "loss.py") if loss_factory is None else source_hash(loss_factory),
+        'loss_config'               : dict(loss_config) if loss_factory is None else None,
+        'epochs'                    : int(config.EPOCHS),
+        'loader_seed_policy'        : 'fold_epoch_seed_v1',
         
         
         # Thông tin về cấu hình
@@ -102,7 +105,7 @@ def make_signature(model_name, dataset_name, train_df, test_df, classes, folds, 
         'learning_rate'             : float(runtime.LEARNING_RATE),
         'weight_decay'              : float(runtime.WEIGHT_DECAY),
         'min_delta'                 : float(getattr(config, 'MIN_DELTA', 0.0)),
-        'scheduler_factor'          : float(getattr(config, 'SCHEDULER_FACTOR ', 0.5)),
+        'scheduler_factor'          : float(getattr(config, 'SCHEDULER_FACTOR', 0.5)),
         'scheduler_patience'        : int(getattr(config, 'SCHEDULER_PATIENCE', 3)),
         'threshold'                 : float(runtime.THRESHOLD),
         'number_of_workers'         : int(runtime.NUMBBER_OF_WORKERS),
@@ -116,7 +119,14 @@ def make_signature(model_name, dataset_name, train_df, test_df, classes, folds, 
         'scale'                     : runtime.SCALE,
         'normalize_mean'            : runtime.TRANSFORM_NORMALIZE_MEAN,
         'normalize_std'             : runtime.TRANSFORM_NORMALIZE_STD,
-        'run_final_model'           : include_final,
+        'run_final_model'           : bool(config.TRAIN_FINAL_MODEL),
+        'enable_postprocess'        : bool(config.ENABLE_POSTPROCESS),
+        'postprocess_calibration'   : str(config.POSTPROCESS_CALIBRATION),
+        'threshold_beta'            : float(config.THRESHOLD_BETA),
+        'threshold_min_recall'      : float(config.THRESHOLD_MIN_RECALL),
     }
     
-    return stable_hash(settings), settings
+    # Folds selected for this invocation are NOT part of experiment identity.
+    # This allows SELECTED_FOLD=[1], then [2,3], then [4,5] in the SAME run.
+    signature_settings = {k: v for k, v in settings.items() if k != 'folds'}
+    return stable_hash(signature_settings), settings

@@ -17,7 +17,7 @@ from utilities.dataset import NIHChestXrayDataset
 
 # ============================================================
 # MODEL SETTINGS
-MODEL_NAME = "CNN Mamba"
+MODEL_NAME = "CNN Mamba_v1.1"
 MAMBA_DIM = 256
 MAMBA_LAYERS = 2
 DROPOUT = 0.20
@@ -90,10 +90,17 @@ class CNNMamba(nn.Module):
         
         return logits
 
+LOSS_CONFIG = {
+    "name": "bce",
+    "pos_weight_alpha": 1.0,
+    "max_pos_weight": None,
+}
+
 if __name__ == "__main__":
     run_experiment(
         model_name      = MODEL_NAME,
         dataset_class   = NIHChestXrayDataset, 
         model_factory   = CNNMamba,
-        model_kwargs    = {}
+        model_kwargs    = {},
+        loss_config=LOSS_CONFIG,
     )

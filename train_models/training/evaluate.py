@@ -1,11 +1,13 @@
+import torch
 import numpy as np
 import pandas as pd
-import torch
+
 from tqdm.auto import tqdm
 from utilities.runtime import runtime
 from utilities.data import create_dataloader
-from utilities.metric import calculate_metrics, class_metrics_dataframe, with_probabilities
 from utilities.file import save_csv, save_json, json_clean
+from utilities.metric import calculate_metrics, class_metrics_dataframe, with_probabilities
+from training.threshold import load_postprocess, apply_postprocess
 
 # ============================================================
 # Đánh giá mô hình
@@ -40,7 +42,7 @@ def evaluate(device, number_of_classes, model, loader, criterion=None, epoch = N
 # Kiểm tra
 def evaluate_test(output_directory, dataset_class, model, criterion, test_df,
                   classes, test_transform, device):
-    # Held-out test is called once, after final model training is complete.
+    # Test set MUST NOT be used to fit calibration/thresholds.
     _, loader = create_dataloader(dataset_class, classes, device, test_df,
                                   test_transform, False, seed=int(runtime.SEED) + 900_000)
     test_loss, metrics, targets, probabilities = evaluate(
@@ -50,56 +52,77 @@ def evaluate_test(output_directory, dataset_class, model, criterion, test_df,
                                      float(runtime.THRESHOLD)))
     save_csv(output_directory / 'test_predictions.csv',
              with_probabilities(test_df, probabilities, classes))
+    baseline = {k: v for k, v in metrics.items() if not k.startswith('class_')}
     summary = {
         'test_loss': test_loss,
         'threshold': float(runtime.THRESHOLD),
-        **{k: v for k, v in metrics.items() if k != 'class_aurocs'},
+        **baseline,
     }
+    postprocess_path = output_directory / 'postprocess.json'
+    if postprocess_path.exists():
+        post = load_postprocess(postprocess_path, classes)
+        calibrated, thresholds = apply_postprocess(probabilities, post, classes)
+        tuned = calculate_metrics(len(classes), targets, calibrated, thresholds)
+        save_csv(output_directory / 'test_class_metrics_postprocessed.csv',
+                 class_metrics_dataframe(targets, calibrated, classes, thresholds))
+        summary['postprocess_file'] = 'postprocess.json'
+        summary['postprocessed'] = {k: v for k, v in tuned.items() if not k.startswith('class_')}
+        summary['postprocess_thresholds'] = {
+            name: float(t) for name, t in zip(classes, thresholds)
+        }
     save_json(output_directory / 'test_summary.json', summary)
     print('\n=== HELD-OUT TEST ===\n' + pd.Series(json_clean(summary)).to_string())
     return summary
 
 # ============================================================
 # Fold Cross Validation
-def cross_validation(output_directory, results, folds, nfolds):
+def cross_validation(output_directory, results, folds, nfolds, signature=None):
     
-    # Ghi nhận kết quả các fold
-    frame = pd.DataFrame(results).sort_values('fold').reset_index(drop=True)
-    
-    # Lưu kết quả từng fold
+    recorded = {}
+    for fold in range(1, nfolds + 1):
+        done_path = output_directory / f'fold_{fold}' / 'fold_done.json'
+        if not done_path.exists():
+            continue
+        from utilities.file import read_json
+        done = read_json(done_path)
+        if signature is not None and done.get('signature') != signature:
+            raise ValueError(f'Fold {fold} has a different training signature.')
+        if int(done['result']['fold']) != fold:
+            raise ValueError(f'Fold result mismatch in {done_path}.')
+        recorded[fold] = done['result']
+    for result in results:
+        fold = int(result['fold'])
+        if fold not in recorded:
+            raise ValueError(f'Fold {fold} has no committed completion marker.')
+    if not recorded:
+        raise RuntimeError('No completed folds to aggregate.')
+    frame = pd.DataFrame([recorded[f] for f in sorted(recorded)]).sort_values('fold').reset_index(drop=True)
     save_csv(output_directory / 'cross_validation_results.csv', frame)
-    
-    # Kiểm tra huấn luyện đủ chưa
-    complete = sorted(folds) == list(range(1, nfolds + 1))
-    
-    # Khởi tạo báo cáo
+    complete = sorted(recorded) == list(range(1, nfolds + 1))
     report = {
-            'completed_folds'       : sorted(folds), 
-            'all_folds_completed'   : complete,
-            'number_of_folds'       : len(results), 
-            'metric_mean_std'       : {}
-        }
-    
-    # Tính trung bình và độ lệch chuẩn
+        'completed_folds': sorted(recorded),
+        'all_folds_completed': complete,
+        'number_of_folds': int(len(recorded)),
+        'metric_mean_std': {},
+    }
     for column in frame.select_dtypes(include='number').columns:
         if column in ('fold', 'best_epoch'):
             continue
         series = frame[column].dropna()
         report['metric_mean_std'][column] = {
-            'mean'                  : float(series.mean()) if len(series) else None,
-            'std'                   : float(series.std(ddof=1)) if len(series) > 1 else None,
-            'number_of_folds'       : int(len(series)),
+            'mean': float(series.mean()) if len(series) else None,
+            'std': float(series.std(ddof=1)) if len(series) > 1 else None,
+            'number_of_folds': int(len(series)),
         }
-        
-    # Lưu kết quả
     save_json(output_directory / 'cross_validation_summary.json', report)
-    
-    # Dự đoán OOF
     if complete:
-        paths = [output_directory / f'fold_{fold}' / 'oof_predictions.csv' for fold in folds]
-        save_csv(output_directory / 'oof_all.csv', pd.concat([pd.read_csv(p) for p in paths], ignore_index=True))
+        paths = [output_directory / f'fold_{fold}' / 'oof_predictions.csv'
+                 for fold in range(1, nfolds + 1)]
+        if not all(path.is_file() for path in paths):
+            raise FileNotFoundError('OOF file missing for a completed fold.')
+        save_csv(output_directory / 'oof_all.csv',
+                 pd.concat([pd.read_csv(path) for path in paths], ignore_index=True))
         print('Hoàn thành toàn bộ Cross-Validation')
     else:
-        print('Chỉ thực hiện một số Fold. Kết quả không đại diện cho toàn bộ Cross-Validation')
-        
+        print('Chưa hoàn thành tất cả folds; chưa tạo OOF tổng hợp và chưa đánh giá test.')
     return frame, complete
