@@ -7,7 +7,7 @@ from torchvision import transforms
 from torch.utils.data import DataLoader
 import config
 from utilities.runtime import runtime
-from utilities.log import print_heading, print_message
+from torchvision.transforms import InterpolationMode
 
 
 def dataset_info(dataset_config):
@@ -27,8 +27,12 @@ def dataset_info(dataset_config):
 
 def transform_setting():
     train_transform = transforms.Compose([
-        transforms.RandomAffine(degrees=runtime.DERGEES,
-                                translate=runtime.TRANSLATE, scale=runtime.SCALE),
+        transforms.RandomAffine(
+            degrees=runtime.DERGEES,
+            translate=runtime.TRANSLATE, 
+            scale=runtime.SCALE,
+            interpolation=InterpolationMode.BILINEAR,
+            ),
         transforms.ToTensor(),
         transforms.Normalize(mean=runtime.TRANSFORM_NORMALIZE_MEAN,
                              std=runtime.TRANSFORM_NORMALIZE_STD),

@@ -16,7 +16,7 @@ from utilities.metric import class_metrics_dataframe, with_probabilities
 from training.evaluate import evaluate
 from training.checkpoint import (save_training_state, resume_training, save_best_model, reconcile_best, check_checkpoint)
 from utilities.file import save_json, save_csv, read_json, load_torch
-
+from utilities.log import model_specification
 # ============================================================
 # Dọn mô hình
 def cleanup():
@@ -168,11 +168,10 @@ def train_one_fold(output_directory, fold, train_transform, validation_transform
     if train_df.empty or validation_df.empty:
         raise ValueError(f'Không lấy được dữ liệu huấn luyện cho {fold}.')
     
-    print(f'\n=== FOLD {fold} [Số ảnh huấn luyện: {len(train_df):,} ảnh | Số ảnh kiểm thử: {len(validation_df):,} ảnh]===')
+    print(f'\n=== FOLD {fold} [Số ảnh huấn luyện: {len(train_df):,} ảnh | Số ảnh kiểm thử: {len(validation_df):,} ảnh] ===')
 
     # Khai báo mô hình
-    model, criterion, optimizer, scheduler, scaler = build_training_objects(
-        fold, classes, model_factory, model_kwargs, device, loss_factory, train_df=train_df, loss_config=loss_config)
+    model, criterion, optimizer, scheduler, scaler = build_training_objects(fold, classes, model_factory, model_kwargs, device, loss_factory, train_df=train_df, loss_config=loss_config)
     patience = int(runtime.PATIENCE)
     min_delta = float(getattr(config, 'MIN_DELTA', 0.0))
     if int(config.EPOCHS) < 1 or patience < 1:

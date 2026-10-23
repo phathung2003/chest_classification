@@ -3,7 +3,9 @@ import sys
 from pathlib import Path
 from tqdm import tqdm   
 from config import MIN_RESULT_WIDTH, MIN_TITLE_WIDTH
-
+import torch
+from thop import profile
+import config
 def print_heading(title):
     print("=" * 100)
     print(title)
@@ -132,12 +134,13 @@ def capture_run_log(run_directory, *, model_name, dataset_name, train_df, test_d
             print('=' * 100 + '\n')
             
             print_heading("Cấu hình tập dữ liệu (Ứng với cài đặt trong file config.py)")
-            print(f"Tổng số fold được chia          : {settings['number_of_folds']} | Fold được chọn: {folds}")
+            print(f"Tổng số fold được chia          : {settings['number_of_folds']}")
+            print(f"Fold được chọn                  : {folds}")
             print(f"Các lớp trong tập dữ liệu       : {settings['classes']}")
             print(f"Kích cỡ ảnh                     : {settings['image_size']}\n")
             
             print_heading("Cấu hình huấn luyện (Ứng với cài đặt trong file config.py)")
-            print(f"Huấn luyện mô hình cuối cùng: {'Có' if include_final else 'Không'}")
+            print(f"Huấn luyện mô hình cuối cùng    : {'Có' if include_final else 'Không'}")
             print(f"Batch size                      : {settings['batch_size']}")
             print(f"Patience                        : {settings['patience']}")
             print(f"Number of worker                : {settings['number_of_workers']}")
@@ -184,3 +187,32 @@ def capture_run_log(run_directory, *, model_name, dataset_name, train_df, test_d
             with mutex:
                 file.flush()
                 os.fsync(file.fileno())
+
+def model_specification(model_factory, classes, device, model_kwargs):
+    model = model_factory(num_classes=len(classes), **model_kwargs).to(device)
+    # Batch size = 1, RGB, 224x224
+    input_tensor = torch.randn(config.BATCH_SIZE, 3, config.IMAGE_SIZE, config.IMAGE_SIZE).to(device)
+    
+    # Tính Parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    # Tính MAC
+    with torch.no_grad():
+        macs, _ = profile(model, inputs=(input_tensor,), verbose=False)
+        
+    # Tính FLOPS
+    flops = 2 * macs
+
+
+    # Thông báo
+
+    print_heading("Thông số mô hình")
+    print(f"Parameters                      : {total_params:,}")
+    print(f"Trainable Params                : {trainable_params}")
+    print(f"MACs                            : {macs:,.0f}")
+    print(f"FLOPs                           : {flops:,.0f}")
+    
+    del model
+    
