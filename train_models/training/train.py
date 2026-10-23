@@ -8,10 +8,10 @@ import torch
 from torch import nn
 from tqdm.auto import tqdm
 from sklearn.metrics import roc_auc_score
-from itertools import count
 import config
 from utilities.runtime import runtime
 from utilities.data import create_dataloader, pos_weight
+from training.loss import build_loss
 from utilities.metric import class_metrics_dataframe, with_probabilities
 from training.evaluate import evaluate
 from training.checkpoint import (save_training_state, resume_training, save_best_model, reconcile_best, check_checkpoint)
@@ -27,13 +27,21 @@ def cleanup():
 # ============================================================
 # Khai báo mô hình
 def build_training_objects(fold, classes, model_factory, model_kwargs, device,
-                           loss_factory=None, *, use_scheduler=True):
+                           loss_factory=None, *, use_scheduler=True, train_df=None,
+                           loss_config=None):
     model = model_factory(num_classes=len(classes), **model_kwargs).to(device)
-    weights = pos_weight(fold, device)
-    if weights.numel() != len(classes):
-        raise ValueError('pos_weight length differs from the number of classes.')
-    criterion = (nn.BCEWithLogitsLoss(pos_weight=weights) if loss_factory is None
-                 else loss_factory(weights))
+    if loss_factory is not None:
+        # API cu: loss_factory(weights), su dung pos_weight tu file .npy.
+        weights = pos_weight(fold, device)
+        if weights.numel() != len(classes):
+            raise ValueError('pos_weight length differs from the number of classes.')
+        criterion = loss_factory(weights)
+    else:
+        if train_df is None:
+            raise ValueError('train_df is required to fit loss weights without data leakage.')
+        if loss_config is None:
+            raise ValueError('Thiếu loss_config của mô hình; không đọc global config.')
+        criterion, _ = build_loss(loss_config, train_df, classes, device)
     if not isinstance(criterion, nn.Module):
         raise TypeError('loss_factory must return a torch.nn.Module.')
     criterion = criterion.to(device)
@@ -42,8 +50,8 @@ def build_training_objects(fold, classes, model_factory, model_kwargs, device,
     optimizer = torch.optim.AdamW(parameters, lr=float(runtime.LEARNING_RATE),
                                   weight_decay=float(runtime.WEIGHT_DECAY))
     scheduler = (torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=float(getattr(config, 'LR_SCHEDULER_FACTOR', 0.5)),
-        patience=int(getattr(config, 'LR_SCHEDULER_PATIENCE', 3))) if use_scheduler else None)
+        optimizer, mode='max', factor=float(getattr(config, 'SCHEDULER_FACTOR', 0.5)),
+        patience=int(getattr(config, 'SCHEDULER_PATIENCE', 3))) if use_scheduler else None)
     scaler = torch.amp.GradScaler('cuda', enabled=bool(runtime.USE_AMP and device.type == 'cuda'))
     return model, criterion, optimizer, scheduler, scaler
 
@@ -70,7 +78,7 @@ def _finalize_fold(fold, fold_directory, signature, model, criterion, device,
     result = {
         'fold': int(fold), 'best_epoch': int(best['epoch']),
         'best_macro_auroc': float(best['validation_macro_auroc']),
-        **{k: v for k, v in metrics.items() if k != 'class_aurocs'},
+        **{k: v for k, v in metrics.items() if not k.startswith('class_')},
     }
     save_csv(fold_directory / 'oof_predictions.csv',
              with_probabilities(validation_df, probabilities, classes))
@@ -134,7 +142,7 @@ def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler):
 
 # ============================================================
 # Huấn luyện Fold
-def train_one_fold(output_directory, fold, train_transform, validation_transform, dataset_class, train_folds_df, classes, model_factory, model_kwargs, device, signature, model_name, loss_factory=None):
+def train_one_fold(output_directory, fold, train_transform, validation_transform, dataset_class, train_folds_df, classes, model_factory, model_kwargs, device, signature, model_name, loss_factory=None, *, loss_config=None):
     
     # Đường dẫn / Biến
     fold = int(fold)
@@ -163,9 +171,12 @@ def train_one_fold(output_directory, fold, train_transform, validation_transform
     print(f'\n=== FOLD {fold} [Số ảnh huấn luyện: {len(train_df):,} ảnh | Số ảnh kiểm thử: {len(validation_df):,} ảnh]===')
 
     # Khai báo mô hình
-    model, criterion, optimizer, scheduler, scaler = build_training_objects(fold, classes, model_factory, model_kwargs, device, loss_factory)
+    model, criterion, optimizer, scheduler, scaler = build_training_objects(
+        fold, classes, model_factory, model_kwargs, device, loss_factory, train_df=train_df, loss_config=loss_config)
     patience = int(runtime.PATIENCE)
     min_delta = float(getattr(config, 'MIN_DELTA', 0.0))
+    if int(config.EPOCHS) < 1 or patience < 1:
+        raise ValueError('EPOCHS and PATIENCE must be positive integers.')
     if min_delta < 0:
         raise ValueError('MIN_DELTA phải là số dương.')
     
@@ -183,13 +194,15 @@ def train_one_fold(output_directory, fold, train_transform, validation_transform
         raise RuntimeError(f'Tạm dừng huấn luyện vì thiếu checkpoint cuối cùng nhưng tồn tại checkpoint tốt nhất tại: {best_path}')
 
     # Khai báo DataLoader
-    _, train_loader = create_dataloader(dataset_class, classes, device, train_df, train_transform, True, seed=int(runtime.SEED))
+    # Training loader is recreated with an epoch-specific generator for deterministic resume.
     _, validation_loader = create_dataloader(dataset_class, classes, device, validation_df, validation_transform, False, seed=int(runtime.SEED))
     
     # Bắt đầu huấn luyện
     if saved is None or not saved['training_finished']:
-        for epoch in count(epoch_start):
-            
+        for epoch in range(epoch_start, int(config.EPOCHS) + 1):
+            _, train_loader = create_dataloader(
+                dataset_class, classes, device, train_df, train_transform, True,
+                seed=int(runtime.SEED) + fold * 100_000 + epoch)
             # Đếm giờ
             started = time.perf_counter()
 
@@ -208,7 +221,8 @@ def train_one_fold(output_directory, fold, train_transform, validation_transform
                 best_auc, best_epoch, no_improvement = auc, epoch, 0
             else:
                 no_improvement += 1
-            scheduler.step(auc)
+            if scheduler is not None:
+                scheduler.step(auc)
             row = {
                 'fold': fold, 
                 'epoch': epoch, 
@@ -224,7 +238,7 @@ def train_one_fold(output_directory, fold, train_transform, validation_transform
                 'no_improvement': no_improvement,
             }
             history.append(row)
-            finished = (no_improvement >= patience)
+            finished = (no_improvement >= patience or epoch >= int(config.EPOCHS))
             
             # Lưu mô hình
             save_training_state(last_path, status='fold', fold=fold, epoch=epoch, model=model, criterion=criterion, optimizer=optimizer, scheduler=scheduler, scaler=scaler, history=history, best_auc=best_auc, best_epoch=best_epoch, no_improvement=no_improvement, signature=signature, training_finished=finished)
@@ -247,7 +261,7 @@ def train_one_fold(output_directory, fold, train_transform, validation_transform
                 break
 
     if not best_path.exists():
-        raise RuntimeError(f'Không lưu được model tốt nhaart cho {fold}.')
+        raise RuntimeError(f'Không lưu được best model cho Fold {fold}.')
     
     # Kết quả
     result = _finalize_fold(fold, fold_directory, signature, model, criterion, device, dataset_class, validation_df, classes, validation_transform, best_path, history)
@@ -260,14 +274,16 @@ def train_one_fold(output_directory, fold, train_transform, validation_transform
 
 # ============================================================
 # Huấn luyện mô hình cuối cùng
-def train_final_model(output_directory, dataset_class, train_df, classes, train_transform, model_factory, model_kwargs, device, epochs, signature, model_name, loss_factory=None):
+def train_final_model(output_directory, dataset_class, train_df, classes, train_transform, model_factory, model_kwargs, device, epochs, signature, model_name, loss_factory=None, *, loss_config=None):
     
     # Khai báo biến / đường dẫn
     final_dir = output_directory / 'final'
     final_dir.mkdir(parents=True, exist_ok=True)
     last_path = final_dir / 'last_checkpoint.pt'
     model_path = output_directory / 'final_model.pt'
-    model, criterion, optimizer, scheduler, scaler = build_training_objects(0, classes, model_factory, model_kwargs, device, loss_factory, use_scheduler = False)
+    model, criterion, optimizer, scheduler, scaler = build_training_objects(
+        0, classes, model_factory, model_kwargs, device, loss_factory,
+        use_scheduler=False, train_df=train_df, loss_config=loss_config)
     history = []
     start_epoch = 1
     saved = None
@@ -286,7 +302,9 @@ def train_final_model(output_directory, dataset_class, train_df, classes, train_
     # Huấn luyện
     if saved is None or not saved['training_finished']:
         for epoch in range(start_epoch, epochs + 1):
-            
+            _, train_loader = create_dataloader(
+                dataset_class, classes, device, train_df, train_transform, True,
+                seed=int(runtime.SEED) + 900_000_000 + epoch)
             # Đếm giờ
             started = time.perf_counter()
 
@@ -326,6 +344,9 @@ def train_final_model(output_directory, dataset_class, train_df, classes, train_
         'model_name': model_name,
         'classes': list(classes), 
         'model_kwargs': model_kwargs,
+        'loss_config': dict(loss_config) if loss_factory is None else None,
+        'loss_factory': None if loss_factory is None else f'{loss_factory.__module__}.{loss_factory.__qualname__}',
+        'postprocess_file': 'postprocess.json' if (output_directory / 'postprocess.json').exists() else None,
         'model_state_dict': latest['model_state_dict'],
     })
     save_csv(output_directory / 'final_training_history.csv', pd.DataFrame(history))

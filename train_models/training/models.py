@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 import numpy as np
 import config
 from utilities.runtime import runtime
@@ -12,8 +13,12 @@ from training.train import train_one_fold, train_final_model, cleanup
 from training.evaluate import evaluate_test
 from utilities.hash import make_signature
 from training.evaluate import cross_validation
-
-def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_factory = None):
+from training.threshold import fit_postprocessing
+from training.loss import check_loss
+def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_factory=None, *, loss_config=None):
+    
+    # Kiểm tra hàm Loss
+    check_loss(loss_config, loss_factory)
     
     # Kiểm tra đường dẫn
     required = [config.TRAIN_FOLDS_DIRECTORY, config.TEST_DIRECTORY, config.DATASET_INFO_DIRECTORY]
@@ -30,10 +35,10 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_
     # Cấu hình Fold
     folds = set_fold(number_of_folds)
     complete_selection = sorted(folds) == list(range(1, number_of_folds + 1))
-    include_final = bool(getattr(config, 'TRAIN_FINAL_MODEL', True)) and complete_selection
+    include_final = bool(getattr(config, 'TRAIN_FINAL_MODEL', True))
     
     # Tạo chữ ký
-    signature, settings = make_signature(model_name, dataset_name, train_df, test_df, classes, folds, number_of_folds, model_factory, dataset_class, model_kwargs, loss_factory, include_final)
+    signature, settings = make_signature(model_name, dataset_name, train_df, test_df, classes, folds, number_of_folds, model_factory, dataset_class, model_kwargs, loss_factory, include_final, loss_config=loss_config)
     
     # Đường dẫn lưu lần chạy
     root = (config.MODELS_OUTPUT_DIRECTORY / to_snake_case(dataset_name) / to_snake_case(model_name))
@@ -52,9 +57,20 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_
         
         # Bắt đầu huấn luyện từng Fold
         for fold in folds:
-            result = train_one_fold(output_directory, fold, train_transform, eval_transform, dataset_class, train_df, classes, model_factory, model_kwargs, device, signature, model_name, loss_factory)
+            result = train_one_fold(output_directory, fold, train_transform, eval_transform, dataset_class, train_df, classes, model_factory, model_kwargs, device, signature, model_name, loss_factory, loss_config=loss_config)
             results.append(result)
-        frame, all_done = cross_validation(output_directory, results, folds, number_of_folds)
+        frame, all_done = cross_validation(output_directory, results, folds, number_of_folds, signature)
+        # Fit A on the COMPLETE development OOF only; never on held-out test.
+        if all_done and bool(getattr(config, 'ENABLE_POSTPROCESS', True)):
+            pp_path = output_directory / 'postprocess.json'
+            if not pp_path.exists():
+                fit_postprocessing(
+                    output_directory / 'oof_all.csv', output_directory,
+                    calibration=str(config.POSTPROCESS_CALIBRATION),
+                    beta=float(config.THRESHOLD_BETA),
+                    min_recall=float(config.THRESHOLD_MIN_RECALL),
+                    default_threshold=float(runtime.THRESHOLD))
+                print('Đã lưu postprocess.json dựa trên OOF')
         
         # Huấn luyện lần cuối
         if include_final and all_done:
@@ -65,14 +81,14 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_
                 model, criterion = train_final_model(
                     output_directory, dataset_class, train_df, classes, train_transform,
                     model_factory, model_kwargs, device, median_epoch, signature,
-                    model_name, loss_factory)
+                    model_name, loss_factory, loss_config=loss_config)
                 evaluate_test(output_directory, dataset_class, model, criterion,
                               test_df, classes, eval_transform, device)
                 del model, criterion
                 cleanup()
         info = read_json(output_directory / 'train_info.json')
-        info['train_completed'] = True
-        info['folds_completed'] = sorted(folds)
+        info['train_completed'] = bool(all_done and (not include_final or (output_directory / 'test_summary.json').exists()))
+        info['folds_completed'] = frame['fold'].astype(int).tolist()
         info['final_test_completed'] = (output_directory / 'test_summary.json').exists()
         save_json(output_directory / 'train_info.json', info)
         return frame

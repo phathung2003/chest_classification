@@ -1,11 +1,6 @@
-# Khai báo utilities
-import sys
-from pathlib import Path
-if str(Path(__file__).resolve().parents[1]) not in sys.path:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from config import NUMBER_OF_FOLDS
 import numpy as np
+
 def check_file_directory(file_directory):
     for file_path in file_directory:
         if not file_path.exists():

@@ -16,8 +16,8 @@ MODELS_OUTPUT_DIRECTORY     = (ROOT_DIRECTORY / "training_results").resolve()   
 
 # Cấu hình huấn luyện
 NUMBER_OF_FOLDS             = 5
-TRAIN_ALL_FOLD              = True
-SELECTED_FOLD               = [1, 2]
+TRAIN_ALL_FOLD              = False
+SELECTED_FOLD               = [1]
 
 IMAGE_SIZE                  = 224
 
@@ -60,3 +60,8 @@ MIN_NUMBER_WIDTH            = 8
     
 # Khác
 IMAGE_EXTENSION             = {".png", ".jpg", ".jpeg"}
+
+ENABLE_POSTPROCESS       = True
+POSTPROCESS_CALIBRATION  = "none"       # none | temperature
+THRESHOLD_BETA           = 1.0          # F1; co the chon F2 = 2.0
+THRESHOLD_MIN_RECALL     = 0.0          # Hoac rang buoc recall min tren OOF
