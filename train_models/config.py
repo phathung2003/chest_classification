@@ -16,7 +16,7 @@ MODELS_OUTPUT_DIRECTORY     = (ROOT_DIRECTORY / "training_results").resolve()   
 
 # Cấu hình huấn luyện
 NUMBER_OF_FOLDS             = 5
-TRAIN_ALL_FOLD              = False
+TRAIN_ALL_FOLD              = True
 SELECTED_FOLD               = [1]
 
 IMAGE_SIZE                  = 224

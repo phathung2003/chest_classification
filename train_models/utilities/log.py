@@ -210,7 +210,7 @@ def model_specification(model_factory, classes, device, model_kwargs):
 
     print_heading("Thông số mô hình")
     print(f"Parameters                      : {total_params:,}")
-    print(f"Trainable Params                : {trainable_params}")
+    print(f"Trainable Params                : {trainable_params:,}")
     print(f"MACs                            : {macs:,.0f}")
     print(f"FLOPs                           : {flops:,.0f}")
     

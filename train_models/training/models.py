@@ -13,7 +13,7 @@ from training.train import train_one_fold, train_final_model, cleanup
 from training.evaluate import evaluate_test
 from utilities.hash import make_signature
 from training.evaluate import cross_validation
-from training.threshold import fit_postprocessing
+from training.threshold import fit_postprocessing, fit_fold_thresholds
 from training.loss import check_loss
 def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_factory=None, *, loss_config=None):
     
@@ -60,6 +60,22 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_
         for fold in folds:
             result = train_one_fold(output_directory, fold, train_transform, eval_transform, dataset_class, train_df, classes, model_factory, model_kwargs, device, signature, model_name, loss_factory, loss_config=loss_config)
             results.append(result)
+            if bool(getattr(config, 'ENABLE_POSTPROCESS', True)):
+                fold_directory = output_directory / f'fold_{fold}'
+                oof_path = fold_directory / 'oof_predictions.csv'
+                postprocess_path = fold_directory / 'postprocess.json'
+                if not oof_path.exists():
+                    raise FileNotFoundError(f'Thiếu dự đoán OOF cho fold {fold}: {oof_path}')
+                if not postprocess_path.exists():
+                    fit_fold_thresholds(
+                        oof_path, fold_directory,
+                        expected_classes=classes,
+                        calibration_fraction=0.75,
+                        seed=int(runtime.SEED),
+                        beta=float(getattr(config, 'THRESHOLD_BETA', 1.0)),
+                        min_recall=float(getattr(config, 'THRESHOLD_MIN_RECALL', 0.0)),
+                        default_threshold=float(runtime.THRESHOLD),
+                    )
         frame, all_done = cross_validation(output_directory, results, folds, number_of_folds, signature)
         # Fit A on the COMPLETE development OOF only; never on held-out test.
         if all_done and bool(getattr(config, 'ENABLE_POSTPROCESS', True)):

@@ -20,7 +20,7 @@ from utilities.dataset import NIHChestXrayDataset
 
 # ============================================================
 # MODEL SETTINGS
-MODEL_NAME = "CNN Mamba_v1.2"
+MODEL_NAME = "CNN Mamba_v1.2.1"
 MAMBA_DIM = 256
 MAMBA_LAYERS = 2
 DROPOUT = 0.35
