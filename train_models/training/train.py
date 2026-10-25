@@ -264,10 +264,10 @@ def train_one_fold(output_directory, fold, train_transform, validation_transform
     result = _finalize_fold(fold, fold_directory, signature, model, criterion, device, dataset_class, validation_df, classes, validation_transform, best_path, history)
     
     # Dọn mô hình
-    del model, criterion, optimizer, scheduler, scaler
+    del optimizer, scheduler, scaler
     cleanup()
     
-    return result
+    return model, criterion, result
 
 # ============================================================
 # Huấn luyện mô hình cuối cùng

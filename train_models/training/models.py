@@ -15,6 +15,7 @@ from utilities.hash import make_signature
 from training.evaluate import cross_validation
 from training.threshold import fit_postprocessing, fit_fold_thresholds
 from training.loss import check_loss
+
 def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_factory=None, *, loss_config=None):
     
     # Kiểm tra hàm Loss
@@ -36,6 +37,12 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_
     folds = set_fold(number_of_folds)
     complete_selection = sorted(folds) == list(range(1, number_of_folds + 1))
     include_final = bool(getattr(config, 'TRAIN_FINAL_MODEL', True))
+    single_fold_test = bool(getattr(config, 'EVALUATE_SINGLE_FOLD_TEST', False))
+    if single_fold_test and (len(folds) != 1 or include_final):
+        raise ValueError(
+            'EVALUATE_SINGLE_FOLD_TEST=True requires exactly one selected fold '
+            'and TRAIN_FINAL_MODEL=False.'
+        )
     
     # Tạo chữ ký
     signature, settings = make_signature(model_name, dataset_name, train_df, test_df, classes, folds, number_of_folds, model_factory, dataset_class, model_kwargs, loss_factory, include_final, loss_config=loss_config)
@@ -58,7 +65,12 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_
         
         # Bắt đầu huấn luyện từng Fold
         for fold in folds:
-            result = train_one_fold(output_directory, fold, train_transform, eval_transform, dataset_class, train_df, classes, model_factory, model_kwargs, device, signature, model_name, loss_factory, loss_config=loss_config)
+            model, criterion, result = train_one_fold(output_directory, fold, train_transform, eval_transform, dataset_class, train_df, classes, model_factory, model_kwargs, device, signature, model_name, loss_factory, loss_config=loss_config)
+            
+            if not single_fold_test:
+                del model, criterion
+                cleanup()
+                
             results.append(result)
             if bool(getattr(config, 'ENABLE_POSTPROCESS', True)):
                 fold_directory = output_directory / f'fold_{fold}'
@@ -77,6 +89,13 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_
                         default_threshold=float(runtime.THRESHOLD),
                     )
         frame, all_done = cross_validation(output_directory, results, folds, number_of_folds, signature)
+        
+        # Chạy test fold đó
+        if single_fold_test:
+            evaluate_test(output_directory, dataset_class, model, criterion, test_df, classes, eval_transform, device)
+            del model, criterion
+            cleanup()
+
         # Fit A on the COMPLETE development OOF only; never on held-out test.
         if all_done and bool(getattr(config, 'ENABLE_POSTPROCESS', True)):
             pp_path = output_directory / 'postprocess.json'
@@ -95,17 +114,20 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_
                 print('Đã hoàn tất đánh giá trên tập Test độc lập. Bỏ qua đánh giá lại.')
             else:
                 median_epoch = max(1, int(np.median(frame['best_epoch'].to_numpy(dtype=int))))
-                model, criterion = train_final_model(
-                    output_directory, dataset_class, train_df, classes, train_transform,
-                    model_factory, model_kwargs, device, median_epoch, signature,
-                    model_name, loss_factory, loss_config=loss_config)
+                model, criterion = train_final_model(output_directory, dataset_class, train_df, classes, train_transform, model_factory, model_kwargs, device, median_epoch, signature, model_name, loss_factory, loss_config=loss_config)
                 evaluate_test(output_directory, dataset_class, model, criterion,
                               test_df, classes, eval_transform, device)
                 del model, criterion
                 cleanup()
+                
         info = read_json(output_directory / 'train_info.json')
         info['train_completed'] = bool(all_done and (not include_final or (output_directory / 'test_summary.json').exists()))
         info['folds_completed'] = frame['fold'].astype(int).tolist()
         info['final_test_completed'] = (output_directory / 'test_summary.json').exists()
+        if single_fold_test:
+            info['single_fold_test_completed'] = (
+                output_directory / f'fold_{folds[0]}' / 'single_fold_test' / 'test_summary.json'
+            ).is_file()
+            info['single_fold_test_fold'] = int(folds[0])
         save_json(output_directory / 'train_info.json', info)
         return frame
