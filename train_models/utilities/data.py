@@ -25,17 +25,24 @@ def dataset_info(dataset_config):
     return train_df, test_df, name, classes, nfolds
 
 
+
 def transform_setting():
     train_transform = transforms.Compose([
         transforms.RandomAffine(
             degrees=runtime.DERGEES,
+            fill=0,
             translate=runtime.TRANSLATE, 
             scale=runtime.SCALE,
-            interpolation=InterpolationMode.BILINEAR,
+            interpolation = InterpolationMode.BILINEAR,
             ),
         transforms.ToTensor(),
-        transforms.Normalize(mean=runtime.TRANSFORM_NORMALIZE_MEAN,
-                             std=runtime.TRANSFORM_NORMALIZE_STD),
+        transforms.ColorJitter(
+            brightness = runtime.BRIGHTNESS,
+            contrast = runtime.CONTRAST,
+        ),
+        transforms.Normalize(
+            mean = runtime.TRANSFORM_NORMALIZE_MEAN,
+            std = runtime.TRANSFORM_NORMALIZE_STD),
     ])
     eval_transform = transforms.Compose([
         transforms.ToTensor(),
@@ -43,6 +50,7 @@ def transform_setting():
                              std=runtime.TRANSFORM_NORMALIZE_STD),
     ])
     return train_transform, eval_transform
+
 
 
 def _seed_worker(worker_id):

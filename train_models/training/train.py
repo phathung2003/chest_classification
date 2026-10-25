@@ -26,9 +26,7 @@ def cleanup():
 
 # ============================================================
 # Khai báo mô hình
-def build_training_objects(fold, classes, model_factory, model_kwargs, device,
-                           loss_factory=None, *, use_scheduler=True, train_df=None,
-                           loss_config=None):
+def build_training_objects(fold, classes, model_factory, model_kwargs, device, loss_factory=None, *, use_scheduler=True, train_df=None, loss_config=None):
     model = model_factory(num_classes=len(classes), **model_kwargs).to(device)
     if loss_factory is not None:
         # API cu: loss_factory(weights), su dung pos_weight tu file .npy.

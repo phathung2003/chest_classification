@@ -25,6 +25,8 @@ class RuntimeState:
     DERGEES                     = config.DERGEES
     TRANSLATE                   = config.TRANSLATE
     SCALE                       = config.SCALE
+    BRIGHTNESS                  = config.BRIGHTNESS
+    CONTRAST                    = config.CONTRAST
     
     TRANSFORM_NORMALIZE_MEAN    = config.TRANSFORM_NORMALIZE_MEAN
     TRANSFORM_NORMALIZE_STD     = config.TRANSFORM_NORMALIZE_STD

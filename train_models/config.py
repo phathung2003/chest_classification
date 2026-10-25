@@ -46,7 +46,8 @@ SCALE                       = (0.95, 1.05)
 TRANSFORM_NORMALIZE_MEAN    = [0.485, 0.456, 0.406]
 TRANSFORM_NORMALIZE_STD     = [0.229, 0.224, 0.225]
 
-
+BRIGHTNESS                  = 0.10
+CONTRAST                    = 0.10
 
 TRAIN_FINAL_MODEL           = True
 # Huấn luyện lại
