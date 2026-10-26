@@ -66,11 +66,15 @@ def create_dataloader(dataset_class, classes, device, dataframe, transform, shuf
     generator.manual_seed(int(runtime.SEED if seed is None else seed))
     workers = int(runtime.NUMBBER_OF_WORKERS)
     loader = DataLoader(
-        dataset, batch_size=int(runtime.BATCH_SIZE), shuffle=shuffle,
-        num_workers=workers, prefetch_factor=2 if workers > 0 else None,
-        pin_memory=(device.type == 'cuda'), drop_last=False,
-        worker_init_fn=_seed_worker, generator=generator,
-        persistent_workers=False,
+        dataset, batch_size = int(runtime.BATCH_SIZE), 
+        shuffle             = shuffle,
+        num_workers         = workers, 
+        prefetch_factor     = int(config.PREFETCH_FACTOR) if workers > 0 else None,
+        pin_memory          = (device.type == 'cuda'),
+        drop_last           = False,
+        worker_init_fn      = _seed_worker, 
+        generator           = generator,
+        persistent_workers  = config.PERSISTENT_WORKERS,
     )
     return dataset, loader
 

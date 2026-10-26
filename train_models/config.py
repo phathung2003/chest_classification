@@ -24,16 +24,24 @@ TRAIN_FINAL_MODEL           = False
 EVALUATE_SINGLE_FOLD_TEST   = True
 ENABLE_POSTPROCESS          = False
 
+PERSISTENT_WORKERS          = True                                                                      # Giữ worker chạy giữa các epoch 
+PREFETCH_FACTOR             = 8                                                                         # Hệ số tải trước
+NUMBBER_OF_WORKERS          = 8                                                                         # Số luồng tải dữ liệu song song
+
 IMAGE_SIZE                  = 224
 
+
+BATCH_SIZE                  = 32
+GRAD_ACCUM_STEPS            = 1                                                                         # Hệ số batch size / epoch
+
 SEED                        = 42
-BATCH_SIZE                  = 16
+
 EPOCHS                      = 30
 LEARNING_RATE               = 1e-4
 WEIGHT_DECAY                = 5e-4
 PATIENCE                    = 5
 THRESHOLD                   = 0.5
-NUMBBER_OF_WORKERS          = 8
+
 USE_AMP                     = True
 SCHEDULER_PATIENCE          = 3
 SCHEDULER_FACTOR            = 0.5

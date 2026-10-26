@@ -90,53 +90,124 @@ def _finalize_fold(fold, fold_directory, signature, model, criterion, device,
 # ============================================================
 # Huấn luyện Epoch
 def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler):
-    
-    # Khai báo hàm/biến huấn luyện
+
+    # Training configuration
+    grad_accum_steps = int(config.GRAD_ACCUM_STEPS)
+
+    if grad_accum_steps < 1:
+        raise ValueError("GRAD_ACCUM_STEPS must be >= 1.")
+
+    # Initialize training
     model.train()
     criterion.train()
+
     total_loss = 0.0
     correct = labels = n_samples = 0
     truths, scores = [], []
-    
-    # Huấn luyện mô hình
-    for images, targets in tqdm(loader, desc=f'Epoch {epoch} [Huấn luyện]', leave = False):
-        images = images.to(device, non_blocking = True)
-        targets = targets.to(device, dtype = torch.float32, non_blocking = True)
-        optimizer.zero_grad(set_to_none = True)
-        
-        # Tính Loss
-        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=bool(runtime.USE_AMP and device.type == 'cuda')):
+
+    accumulated_samples = 0
+
+    # Reset gradients before training
+    optimizer.zero_grad(set_to_none=True)
+
+    # Training loop
+    progress = tqdm(loader, desc=f'Epoch {epoch} [Huấn luyện]', leave=False)
+
+    for step, (images, targets) in enumerate(progress, start=1):
+
+        images = images.to(device, non_blocking=True)
+        targets = targets.to(
+            device,
+            dtype=torch.float32,
+            non_blocking=True
+        )
+
+        batch_size = images.size(0)
+
+        # Forward
+        with torch.autocast(
+            device_type=device.type,
+            dtype=torch.float16,
+            enabled=bool(runtime.USE_AMP and device.type == 'cuda')
+        ):
             logits = model(images)
             loss = criterion(logits, targets)
+
         if not torch.isfinite(loss).item():
-            raise FloatingPointError(f'Giá trị Loss không hợp lệ tại Epoch {epoch}.')
-        
-        # Cập nhật trọng số
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-        
-        # Tính Loss huấn luyện
-        batch_size = images.size(0)
+            raise FloatingPointError(
+                f'Giá trị Loss không hợp lệ tại Epoch {epoch}.'
+            )
+
+        # Accumulate gradients
+        scaler.scale(loss * batch_size).backward()
+        accumulated_samples += batch_size
+
+        # Check optimizer update
+        should_update = (
+            step % grad_accum_steps == 0
+            or step == len(loader)
+        )
+
+        if should_update:
+
+            # Unscale gradients
+            scaler.unscale_(optimizer)
+
+            # Normalize accumulated gradients
+            for group in optimizer.param_groups:
+                for param in group["params"]:
+                    if param.grad is not None:
+                        param.grad.div_(accumulated_samples)
+
+            # Update model weights
+            scaler.step(optimizer)
+            scaler.update()
+
+            # Reset gradients
+            optimizer.zero_grad(set_to_none=True)
+            accumulated_samples = 0
+
+        # Training loss
         total_loss += float(loss.detach()) * batch_size
-        
-        # Tính Accuracy
+
+        # Training accuracy
         n_samples += batch_size
-        probabilities = torch.sigmoid(logits.detach().float())
-        correct += int(((probabilities >= runtime.THRESHOLD) == targets.bool()).sum().item())
+
+        probabilities = torch.sigmoid(
+            logits.detach().float()
+        )
+
+        correct += int(
+            (
+                (probabilities >= runtime.THRESHOLD)
+                == targets.bool()
+            ).sum().item()
+        )
+
         labels += targets.numel()
-        truths.append(targets.detach().cpu().numpy())
-        scores.append(probabilities.cpu().numpy())
-        
-    # Tính AUROC
+
+        truths.append(
+            targets.detach().cpu().numpy()
+        )
+
+        scores.append(
+            probabilities.cpu().numpy()
+        )
+
+    # Calculate AUROC
     if n_samples == 0:
         raise ValueError('Tập huấn luyện không có dữ liệu')
+
     y_true = np.concatenate(truths)
     y_prob = np.concatenate(scores)
-    aucs = [roc_auc_score(y_true[:, i], y_prob[:, i])
-            for i in range(y_true.shape[1]) if np.unique(y_true[:, i]).size == 2]
-    
-    return total_loss / n_samples, correct / labels, (float(np.mean(aucs)) if aucs else float('nan'))
+
+    aucs = [
+        roc_auc_score(y_true[:, i], y_prob[:, i])
+        for i in range(y_true.shape[1])
+        if np.unique(y_true[:, i]).size == 2
+    ]
+
+    return total_loss / n_samples, correct / labels, float(np.mean(aucs)) if aucs else float('nan')
 
 # ============================================================
 # Huấn luyện Fold
@@ -194,12 +265,11 @@ def train_one_fold(output_directory, fold, train_transform, validation_transform
     # Training loader is recreated with an epoch-specific generator for deterministic resume.
     _, validation_loader = create_dataloader(dataset_class, classes, device, validation_df, validation_transform, False, seed=int(runtime.SEED))
     
+    _, train_loader = create_dataloader( dataset_class, classes, device, train_df, train_transform, True, seed=int(runtime.SEED))
     # Bắt đầu huấn luyện
     if saved is None or not saved['training_finished']:
         for epoch in range(epoch_start, int(config.EPOCHS) + 1):
-            _, train_loader = create_dataloader(
-                dataset_class, classes, device, train_df, train_transform, True,
-                seed=int(runtime.SEED) + fold * 100_000 + epoch)
+
             # Đếm giờ
             started = time.perf_counter()
 
