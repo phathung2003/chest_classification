@@ -28,6 +28,8 @@ def dataset_info(dataset_config):
 
 def transform_setting():
     train_transform = transforms.Compose([
+        transforms.RandomHorizontalFlip(p=config.FLIP_CHANCE),
+
         transforms.RandomAffine(
             degrees=runtime.DERGEES,
             fill=0,

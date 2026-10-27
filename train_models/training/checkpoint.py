@@ -42,7 +42,7 @@ def restore_rng(state):
 # Lưu trạng thái        
 def save_training_state(path, *, status, fold, epoch, model, criterion, optimizer,
                         scheduler, scaler, history, best_auc, best_epoch,
-                        no_improvement, signature, training_finished):
+                        no_improvement, signature, training_finished, selection_metric="macro_auroc"):
     payload = {
         'status': status,
         'fold': int(fold),
@@ -53,7 +53,8 @@ def save_training_state(path, *, status, fold, epoch, model, criterion, optimize
         'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
         'scaler_state_dict': scaler.state_dict(),
         'history': history,
-        'best_auc': float(best_auc),
+        'best_auc': float(best_auc), # legacy key: stores best score for chosen selection_metric
+        'selection_metric': str(selection_metric),
         'best_epoch': int(best_epoch),
         'no_improvement': int(no_improvement),
         'signature': signature,
@@ -101,13 +102,15 @@ def resume_training(path, *, model, criterion, optimizer, scheduler, scaler,
 
 # ============================================================
 # Lưu mô hình tốt nhất
-def save_best_model(path, *, model, fold, epoch, score, signature, classes, model_name, model_kwargs):
+def save_best_model(path, *, model, fold, epoch, score, signature, classes, model_name, model_kwargs, selection_metric="macro_auroc", validation_macro_auroc=None):
     save_torch(path, {
         'fold'                      : int(fold), 
         'epoch'                     : int(epoch),
         'status'                      : 'best',
         'signature'                 : signature, 
-        'validation_macro_auroc'    : float(score),
+        'validation_macro_auroc'    : float(score if validation_macro_auroc is None else validation_macro_auroc),
+        'selection_metric'          : str(selection_metric),
+        'selection_score'           : float(score),
         'model_name'                : model_name,
         'model_kwargs'              : model_kwargs,
         'classes'                   : list(classes),
@@ -147,7 +150,11 @@ def reconcile_best(last, best_path, *, signature, fold, classes, model_name, mod
         'epoch'                     : epoch,
         'status'                      : 'best',
         'signature'                 : signature, 
-        'validation_macro_auroc'    : float(last['best_auc']),
+        'validation_macro_auroc'    : float(next(
+            (row['macro_auroc'] for row in last['history']
+             if int(row['epoch']) == epoch), last['best_auc'])),
+        'selection_metric'          : str(last.get('selection_metric', 'macro_auroc')),
+        'selection_score'           : float(last['best_auc']),
         'model_name'                : model_name, 
         'model_kwargs'              : model_kwargs,
         'classes'                   : list(classes), 

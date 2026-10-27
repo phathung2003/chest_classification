@@ -31,20 +31,20 @@ NUMBBER_OF_WORKERS          = 8                                                 
 IMAGE_SIZE                  = 224
 
 
-BATCH_SIZE                  = 32
+BATCH_SIZE                  = 32 #16
 GRAD_ACCUM_STEPS            = 1                                                                         # Hệ số batch size / epoch
 
 SEED                        = 42
 
 EPOCHS                      = 30
-LEARNING_RATE               = 1e-4
-WEIGHT_DECAY                = 5e-4
+LEARNING_RATE               = 0.001
+WEIGHT_DECAY                = 0
 PATIENCE                    = 5
 THRESHOLD                   = 0.5
 
 USE_AMP                     = True
 SCHEDULER_PATIENCE          = 3
-SCHEDULER_FACTOR            = 0.5
+SCHEDULER_FACTOR            = 0.1
 MIN_DELTA                   = 0
 
 # Cấu hình tái lập
@@ -63,6 +63,7 @@ TRANSFORM_NORMALIZE_STD     = [0.229, 0.224, 0.225]
 BRIGHTNESS                  = 0.10
 CONTRAST                    = 0.10
 
+FLIP_CHANCE                 = 0.5
 # Huấn luyện lại
 RESUME_TRAINING             = True
 

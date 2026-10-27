@@ -15,12 +15,37 @@ from utilities.hash import make_signature
 from training.evaluate import cross_validation
 from training.threshold import fit_postprocessing, fit_fold_thresholds
 from training.loss import check_loss
+from training.optimizer import normalize_training_config
 
-def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_factory=None, *, loss_config=None):
+def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_factory=None, *,
+                   loss_config=None, training_config=None, optimizer_factory=None,
+                   optimizer_config=None, scheduler_config=None, selection_metric=None):
     
     # Kiểm tra hàm Loss
     check_loss(loss_config, loss_factory)
     
+    # Accept flat per-model settings while preserving legacy training_config.
+    # LR, weight decay, batch size and patience remain global in config.py.
+    flat_options = (optimizer_config, scheduler_config, selection_metric)
+    if training_config is not None and any(value is not None for value in flat_options):
+        raise ValueError(
+            "Do not combine training_config with optimizer_config, "
+            "scheduler_config or selection_metric."
+        )
+
+    if training_config is None:
+        training_config = {
+            "optimizer": optimizer_config,
+            "scheduler": scheduler_config,
+        }
+        if selection_metric is not None:
+            training_config["selection_metric"] = selection_metric
+
+    training_config = normalize_training_config(training_config)
+    if optimizer_factory is not None and training_config["optimizer"]:
+        raise ValueError("Select optimizer_factory OR optimizer_config, not both")
+    runtime.BATCH_SIZE = training_config["batch_size"]
+
     # Kiểm tra đường dẫn
     required = [config.TRAIN_FOLDS_DIRECTORY, config.TEST_DIRECTORY, config.DATASET_INFO_DIRECTORY]
     check_file_directory(required)
@@ -45,7 +70,7 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_
         )
     
     # Tạo chữ ký
-    signature, settings = make_signature(model_name, dataset_name, train_df, test_df, classes, folds, number_of_folds, model_factory, dataset_class, model_kwargs, loss_factory, include_final, loss_config=loss_config)
+    signature, settings = make_signature(model_name, dataset_name, train_df, test_df, classes, folds, number_of_folds, model_factory, dataset_class, model_kwargs, loss_factory, include_final, loss_config=loss_config, training_config=training_config, optimizer_factory=optimizer_factory)
     
     # Đường dẫn lưu lần chạy
     root = (config.MODELS_OUTPUT_DIRECTORY / to_snake_case(dataset_name) / to_snake_case(model_name))
@@ -65,7 +90,7 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_
         
         # Bắt đầu huấn luyện từng Fold
         for fold in folds:
-            model, criterion, result = train_one_fold(output_directory, fold, train_transform, eval_transform, dataset_class, train_df, classes, model_factory, model_kwargs, device, signature, model_name, loss_factory, loss_config=loss_config)
+            model, criterion, result = train_one_fold(output_directory, fold, train_transform, eval_transform, dataset_class, train_df, classes, model_factory, model_kwargs, device, signature, model_name, loss_factory, loss_config=loss_config, training_config=training_config, optimizer_factory=optimizer_factory)
             
             if not single_fold_test:
                 del model, criterion
@@ -92,7 +117,9 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_
         
         # Chạy test fold đó
         if single_fold_test:
-            evaluate_test(output_directory, dataset_class, model, criterion, test_df, classes, eval_transform, device)
+            single_fold_directory = output_directory / f'fold_{folds[0]}' / 'single_fold_test'
+            single_fold_directory.mkdir(parents=True, exist_ok=True)
+            evaluate_test(single_fold_directory, dataset_class, model, criterion, test_df, classes, eval_transform, device)
             del model, criterion
             cleanup()
 
@@ -114,7 +141,7 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs, loss_
                 print('Đã hoàn tất đánh giá trên tập Test độc lập. Bỏ qua đánh giá lại.')
             else:
                 median_epoch = max(1, int(np.median(frame['best_epoch'].to_numpy(dtype=int))))
-                model, criterion = train_final_model(output_directory, dataset_class, train_df, classes, train_transform, model_factory, model_kwargs, device, median_epoch, signature, model_name, loss_factory, loss_config=loss_config)
+                model, criterion = train_final_model(output_directory, dataset_class, train_df, classes, train_transform, model_factory, model_kwargs, device, median_epoch, signature, model_name, loss_factory, loss_config=loss_config, training_config=training_config, optimizer_factory=optimizer_factory)
                 evaluate_test(output_directory, dataset_class, model, criterion,
                               test_df, classes, eval_transform, device)
                 del model, criterion

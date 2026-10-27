@@ -6,6 +6,7 @@ from config import MIN_RESULT_WIDTH, MIN_TITLE_WIDTH
 import torch
 from thop import profile
 import config
+
 def print_heading(title):
     print("=" * 100)
     print(title)
@@ -142,6 +143,12 @@ def capture_run_log(run_directory, *, model_name, dataset_name, train_df, test_d
             print_heading("Cấu hình huấn luyện (Ứng với cài đặt trong file config.py)")
             print(f"Huấn luyện mô hình cuối cùng    : {'Có' if include_final else 'Không'}")
             print(f"Batch size                      : {settings['batch_size']}")
+            tc = settings.get('training_config') or {}
+            print(f"Optimizer                       : {tc.get('optimizer', {}).get('name', 'adamw') if not settings.get('optimizer_factory_hash') else 'custom factory'}")
+            print(f"Optimizer config                : {tc.get('optimizer', {})}")
+            print(f"Scheduler config                : {tc.get('scheduler', {})}")
+            print(f"Best model criterion            : {tc.get('selection_metric', 'macro_auroc')}")
+            print(f"Augmentation profile            : {tc.get('augmentation', 'default')}")
             print(f"Patience                        : {settings['patience']}")
             print(f"Number of worker                : {settings['number_of_workers']}")
             
@@ -191,7 +198,7 @@ def capture_run_log(run_directory, *, model_name, dataset_name, train_df, test_d
 def model_specification(model_factory, classes, device, model_kwargs):
     model = model_factory(num_classes=len(classes), **model_kwargs).to(device)
     # Batch size = 1, RGB, 224x224
-    input_tensor = torch.randn(config.BATCH_SIZE, 3, config.IMAGE_SIZE, config.IMAGE_SIZE).to(device)
+    input_tensor = torch.randn(1, 3, config.IMAGE_SIZE, config.IMAGE_SIZE).to(device)
     
     # Tính Parameters
     total_params = sum(p.numel() for p in model.parameters())

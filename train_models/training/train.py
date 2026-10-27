@@ -12,11 +12,11 @@ import config
 from utilities.runtime import runtime
 from utilities.data import create_dataloader, pos_weight
 from training.loss import build_loss
+from training.optimizer import make_optimizer, make_scheduler, normalize_training_config
 from utilities.metric import class_metrics_dataframe, with_probabilities
 from training.evaluate import evaluate
 from training.checkpoint import (save_training_state, resume_training, save_best_model, reconcile_best, check_checkpoint)
 from utilities.file import save_json, save_csv, read_json, load_torch
-from utilities.log import model_specification
 # ============================================================
 # Dọn mô hình
 def cleanup():
@@ -26,7 +26,7 @@ def cleanup():
 
 # ============================================================
 # Khai báo mô hình
-def build_training_objects(fold, classes, model_factory, model_kwargs, device, loss_factory=None, *, use_scheduler=True, train_df=None, loss_config=None):
+def build_training_objects(fold, classes, model_factory, model_kwargs, device, loss_factory=None, *, use_scheduler=True, train_df=None, loss_config=None, training_config=None, optimizer_factory=None):
     model = model_factory(num_classes=len(classes), **model_kwargs).to(device)
     if loss_factory is not None:
         # API cu: loss_factory(weights), su dung pos_weight tu file .npy.
@@ -45,11 +45,9 @@ def build_training_objects(fold, classes, model_factory, model_kwargs, device, l
     criterion = criterion.to(device)
     # Support stateful losses with trainable parameters as well.
     parameters = list(model.parameters()) + [p for p in criterion.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(parameters, lr=float(runtime.LEARNING_RATE),
-                                  weight_decay=float(runtime.WEIGHT_DECAY))
-    scheduler = (torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=float(getattr(config, 'SCHEDULER_FACTOR', 0.5)),
-        patience=int(getattr(config, 'SCHEDULER_PATIENCE', 3))) if use_scheduler else None)
+    training_config = normalize_training_config(training_config)
+    optimizer = make_optimizer(parameters, training_config['optimizer'], optimizer_factory)
+    scheduler = make_scheduler(optimizer, training_config['scheduler']) if use_scheduler else None
     scaler = torch.amp.GradScaler('cuda', enabled=bool(runtime.USE_AMP and device.type == 'cuda'))
     return model, criterion, optimizer, scheduler, scaler
 
@@ -75,7 +73,9 @@ def _finalize_fold(fold, fold_directory, signature, model, criterion, device,
                                                   val_loader, criterion)
     result = {
         'fold': int(fold), 'best_epoch': int(best['epoch']),
-        'best_macro_auroc': float(best['validation_macro_auroc']),
+        'best_macro_auroc': float(metrics['macro_auroc']),
+        'best_selection_metric': best.get('selection_metric', 'macro_auroc'),
+        'best_selection_score': float(best.get('selection_score', best['validation_macro_auroc'])),
         **{k: v for k, v in metrics.items() if not k.startswith('class_')},
     }
     save_csv(fold_directory / 'oof_predictions.csv',
@@ -211,7 +211,7 @@ def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler):
 
 # ============================================================
 # Huấn luyện Fold
-def train_one_fold(output_directory, fold, train_transform, validation_transform, dataset_class, train_folds_df, classes, model_factory, model_kwargs, device, signature, model_name, loss_factory=None, *, loss_config=None):
+def train_one_fold(output_directory, fold, train_transform, validation_transform, dataset_class, train_folds_df, classes, model_factory, model_kwargs, device, signature, model_name, loss_factory=None, *, loss_config=None, training_config=None, optimizer_factory=None):
     
     # Đường dẫn / Biến
     fold = int(fold)
@@ -220,16 +220,30 @@ def train_one_fold(output_directory, fold, train_transform, validation_transform
     done_path = fold_directory / 'fold_done.json'
     last_path = fold_directory / 'last_checkpoint.pt'
     best_path = fold_directory / 'best_model.pt'
-    epoch_start, history, best_auc, best_epoch, no_improvement = 1, [], -1.0, 0, 0
+    training_config = normalize_training_config(training_config)
+    selection_metric = training_config['selection_metric']
+    higher_is_better = selection_metric == 'macro_auroc'
+    epoch_start, history, best_score, best_epoch, no_improvement = 1, [], (-float('inf') if higher_is_better else float('inf')), 0, 0
     saved = None
     
     # Kiểm tra mô hình đã chạy hoàn thành 
     if done_path.exists():
         done = read_json(done_path)
         if done.get('signature') != signature:
-            raise ValueError(f'Fold {fold} đã có dâu hiệu chỉnh sửa')
+            raise ValueError(f'Fold {fold} đã có dấu hiệu chỉnh sửa')
+        # Preserve the (model, criterion, result) return contract on resume,
+        # including single-fold test execution with the restored best weights.
+        if not best_path.is_file():
+            raise FileNotFoundError(f'Missing best model for completed fold: {best_path}')
+        train_df_done = train_folds_df.loc[train_folds_df['Fold'] != fold].reset_index(drop=True)
+        model, criterion, optimizer, scheduler, scaler = build_training_objects(
+            fold, classes, model_factory, model_kwargs, device, loss_factory,
+            train_df=train_df_done, loss_config=loss_config,
+            training_config=training_config, optimizer_factory=optimizer_factory)
+        _load_best(best_path, model, device, signature, fold)
+        del optimizer, scheduler, scaler
         print(f'Fold {fold} đã chạy hoàn thành')
-        return done['result']
+        return model, criterion, done['result']
 
     # Đọc dữ liệu
     train_df = train_folds_df.loc[train_folds_df['Fold'] != fold].reset_index(drop=True)
@@ -240,8 +254,8 @@ def train_one_fold(output_directory, fold, train_transform, validation_transform
     print(f'\n=== FOLD {fold} [Số ảnh huấn luyện: {len(train_df):,} ảnh | Số ảnh kiểm thử: {len(validation_df):,} ảnh] ===')
 
     # Khai báo mô hình
-    model, criterion, optimizer, scheduler, scaler = build_training_objects(fold, classes, model_factory, model_kwargs, device, loss_factory, train_df=train_df, loss_config=loss_config)
-    patience = int(runtime.PATIENCE)
+    model, criterion, optimizer, scheduler, scaler = build_training_objects(fold, classes, model_factory, model_kwargs, device, loss_factory, train_df=train_df, loss_config=loss_config, training_config=training_config, optimizer_factory=optimizer_factory)
+    patience = int(training_config["early_stop_patience"])
     min_delta = float(getattr(config, 'MIN_DELTA', 0.0))
     if int(config.EPOCHS) < 1 or patience < 1:
         raise ValueError('EPOCHS and PATIENCE must be positive integers.')
@@ -253,7 +267,9 @@ def train_one_fold(output_directory, fold, train_transform, validation_transform
         saved = resume_training(last_path, model=model, criterion=criterion, optimizer=optimizer, scheduler=scheduler, scaler=scaler, device=device, signature=signature, fold=fold, status='fold')
         epoch_start = int(saved['epoch']) + 1
         history = saved['history']
-        best_auc = float(saved['best_auc'])
+        if saved.get('selection_metric', 'macro_auroc') != selection_metric:
+            raise ValueError('Checkpoint selection metric differs from current training setting')
+        best_score = float(saved['best_auc'])
         best_epoch = int(saved['best_epoch'])
         no_improvement = int(saved['no_improvement'])
         reconcile_best(saved, best_path, signature=signature, fold=fold, classes=classes, model_name=model_name, model_kwargs=model_kwargs)
@@ -279,17 +295,24 @@ def train_one_fold(output_directory, fold, train_transform, validation_transform
             # Đánh giá mô hình
             validation_loss, metrics, _, _ = evaluate(device, len(classes), model, validation_loader, criterion, epoch=epoch)
             auc = float(metrics['macro_auroc'])
-            if not math.isfinite(auc):
+            if higher_is_better and not math.isfinite(auc):
                 raise ValueError(f'Epoch {epoch} không tính được macro AUROC.')
             
-            # Kiểm tra mô hình có cải thiện không
-            improved = auc > (best_auc + min_delta) if best_epoch else True
+            # Paper uses min(validation_loss); default pipeline uses max(macro_auroc).
+            score = auc if higher_is_better else float(validation_loss)
+            if not math.isfinite(score):
+                raise ValueError('Checkpoint score must be finite')
+            improved = (
+                (score > best_score + min_delta) if higher_is_better
+                else (score < best_score - min_delta)
+            ) if best_epoch else True
             if improved:
-                best_auc, best_epoch, no_improvement = auc, epoch, 0
+                best_score, best_epoch, no_improvement = score, epoch, 0
             else:
                 no_improvement += 1
             if scheduler is not None:
-                scheduler.step(auc)
+                scheduler_mode = training_config['scheduler'].get('mode', 'max')
+                scheduler.step(float(validation_loss) if scheduler_mode == 'min' else auc)
             row = {
                 'fold': fold, 
                 'epoch': epoch, 
@@ -308,13 +331,13 @@ def train_one_fold(output_directory, fold, train_transform, validation_transform
             finished = (no_improvement >= patience or epoch >= int(config.EPOCHS))
             
             # Lưu mô hình
-            save_training_state(last_path, status='fold', fold=fold, epoch=epoch, model=model, criterion=criterion, optimizer=optimizer, scheduler=scheduler, scaler=scaler, history=history, best_auc=best_auc, best_epoch=best_epoch, no_improvement=no_improvement, signature=signature, training_finished=finished)
+            save_training_state(last_path, status='fold', fold=fold, epoch=epoch, model=model, criterion=criterion, optimizer=optimizer, scheduler=scheduler, scaler=scaler, history=history, best_auc=best_score, best_epoch=best_epoch, no_improvement=no_improvement, signature=signature, training_finished=finished, selection_metric=selection_metric)
             
             # Lưu mô hình tốt nhất
             improve_text = f"No improvement {no_improvement}/{patience}"
             
             if improved:
-                save_best_model(best_path, model=model, fold=fold, epoch=epoch, score=auc, signature=signature, classes=classes, model_name=model_name, model_kwargs=model_kwargs)
+                save_best_model(best_path, model=model, fold=fold, epoch=epoch, score=score, signature=signature, classes=classes, model_name=model_name, model_kwargs=model_kwargs, selection_metric=selection_metric, validation_macro_auroc=auc)
                 improve_text = "[New best model]"
                 
             save_csv(fold_directory / 'history.csv', pd.DataFrame(history))
@@ -322,7 +345,7 @@ def train_one_fold(output_directory, fold, train_transform, validation_transform
             # In kết quả
             print(f'Epoch {epoch:02d} | Train: [Loss: {train_loss:.4f}, Accuracy: {train_accuracy:.4f}, AUROC: {train_auc:.4f}] | '
                   f' Validation: [Loss: {validation_loss:.4f}, Macro AUROC {auc:.4f}] - '
-                  f'Best AUROC: {best_auc:.4f} (epoch {best_epoch}) | Time: {time.perf_counter() - started:.0f}s | {improve_text}')
+                  f'Best {selection_metric}: {best_score:.4f} (epoch {best_epoch}) | Time: {time.perf_counter() - started:.0f}s | {improve_text}')
             
             if finished:
                 break
@@ -341,7 +364,7 @@ def train_one_fold(output_directory, fold, train_transform, validation_transform
 
 # ============================================================
 # Huấn luyện mô hình cuối cùng
-def train_final_model(output_directory, dataset_class, train_df, classes, train_transform, model_factory, model_kwargs, device, epochs, signature, model_name, loss_factory=None, *, loss_config=None):
+def train_final_model(output_directory, dataset_class, train_df, classes, train_transform, model_factory, model_kwargs, device, epochs, signature, model_name, loss_factory=None, *, loss_config=None, training_config=None, optimizer_factory=None):
     
     # Khai báo biến / đường dẫn
     final_dir = output_directory / 'final'
@@ -350,7 +373,7 @@ def train_final_model(output_directory, dataset_class, train_df, classes, train_
     model_path = output_directory / 'final_model.pt'
     model, criterion, optimizer, scheduler, scaler = build_training_objects(
         0, classes, model_factory, model_kwargs, device, loss_factory,
-        use_scheduler=False, train_df=train_df, loss_config=loss_config)
+        use_scheduler=False, train_df=train_df, loss_config=loss_config, training_config=training_config, optimizer_factory=optimizer_factory)
     history = []
     start_epoch = 1
     saved = None
@@ -387,7 +410,7 @@ def train_final_model(output_directory, dataset_class, train_df, classes, train_
                 'elapsed_seconds': time.perf_counter() - started,
             })
             # Lưu checkpoint
-            save_training_state(last_path, status='final', fold=0, epoch=epoch, model=model, criterion=criterion, optimizer=optimizer, scheduler=None, scaler=scaler, history=history, best_auc=-1.0, best_epoch=0, no_improvement=0, signature=signature, training_finished=(epoch == epochs))
+            save_training_state(last_path, status='final', fold=0, epoch=epoch, model=model, criterion=criterion, optimizer=optimizer, scheduler=None, scaler=scaler, history=history, best_auc=-1.0, best_epoch=0, no_improvement=0, signature=signature, training_finished=(epoch == epochs), selection_metric=normalize_training_config(training_config)["selection_metric"])
             save_csv(output_directory / 'final_training_history.csv', pd.DataFrame(history))
             print(f'Epoch {epoch:02d}/{epochs} | Train: [Loss: {loss:.4f}, Accuracy: {accuracy:.4f}, AUROC: {auc:.4f}] | Time: {time.perf_counter() - started:.0f}s')
 

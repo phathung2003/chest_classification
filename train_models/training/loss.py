@@ -72,7 +72,17 @@ def build_loss(loss_config, train_df, classes, device):
     """Return (criterion, serializable metadata) for a NEW training run."""
     cfg = dict(loss_config)
     name = cfg.get("name", "bce").lower()
-    if name == "bce":
+    if name == "chexnet_bce":
+        # Unweighted multi-label BCE summed over classes, averaged over samples.
+        class CheXNetBCE(nn.Module):
+            def forward(self, logits, targets):
+                x = F.binary_cross_entropy_with_logits(
+                    logits.float(), targets.float(), reduction="none"
+                )
+                return x.sum(dim=1).mean()
+        criterion = CheXNetBCE()
+        metadata = {"name": "chexnet_bce", "reduction": "sum_classes_mean_batch"}
+    elif name == "bce":
         alpha = float(cfg.get("pos_weight_alpha", 1.0))
         clip = cfg.get("max_pos_weight")
         weights = pos_weight_from_train(train_df, classes, alpha, clip).to(device)
@@ -106,7 +116,7 @@ def check_loss(loss_config, loss_factory):
     
     if loss_config is not None:
         if not isinstance(loss_config, dict) or not isinstance(loss_config.get('name'), str):
-            raise TypeError('loss_config phải là dict chứa name: bce, focal hoặc asl.')
+            raise TypeError('loss_config phải là dict chứa name: bce, chexnet_bce, focal hoặc asl.')
         
         loss_config = deepcopy(loss_config)
         

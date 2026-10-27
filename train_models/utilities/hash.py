@@ -70,7 +70,7 @@ def pos_weight_hash(folds, include_final):
 
 # ============================================================
 # Tạo chữ ký
-def make_signature(model_name, dataset_name, train_df, test_df, classes, folds, number_of_folds, model_factory, dataset_class, model_kwargs, loss_factory, include_final, *, loss_config=None):
+def make_signature(model_name, dataset_name, train_df, test_df, classes, folds, number_of_folds, model_factory, dataset_class, model_kwargs, loss_factory, include_final, *, loss_config=None, training_config=None, optimizer_factory=None):
     settings = {
         # Thông tin về model
         'model_name'                : model_name, 
@@ -91,6 +91,10 @@ def make_signature(model_name, dataset_name, train_df, test_df, classes, folds, 
         'loss_name'                 : str(loss_config['name']).lower() if loss_factory is None else f'{loss_factory.__module__}.{loss_factory.__qualname__}',
         'loss_source_hash'          : file_hash(Path(__file__).resolve().parents[1] / "training" / "loss.py") if loss_factory is None else source_hash(loss_factory),
         'loss_config'               : dict(loss_config) if loss_factory is None else None,
+        'training_config'           : dict(training_config or {}),
+        'optimizer_factory_hash'    : source_hash(optimizer_factory) if optimizer_factory else None,
+        'transform_source_hash'     : file_hash(Path(__file__).resolve().parent / 'data.py'),
+        'optimizer_source_hash'     : file_hash(Path(__file__).resolve().parents[1] / 'training' / 'optimizer.py'),
         'epochs'                    : int(config.EPOCHS),
         'loader_seed_policy'        : 'fold_epoch_seed_v1',
         
@@ -101,12 +105,12 @@ def make_signature(model_name, dataset_name, train_df, test_df, classes, folds, 
         'batch_size'                : int(runtime.BATCH_SIZE),
         'seed'                      : int(runtime.SEED),
         
-        'patience'                  : int(runtime.PATIENCE),
-        'learning_rate'             : float(runtime.LEARNING_RATE),
-        'weight_decay'              : float(runtime.WEIGHT_DECAY),
+        'patience'                  : int((training_config or {}).get('early_stop_patience', runtime.PATIENCE)),
+        'learning_rate'             : float((training_config or {}).get('optimizer', {}).get('lr', runtime.LEARNING_RATE)),
+        'weight_decay'              : float((training_config or {}).get('optimizer', {}).get('weight_decay', runtime.WEIGHT_DECAY)),
         'min_delta'                 : float(getattr(config, 'MIN_DELTA', 0.0)),
-        'scheduler_factor'          : float(getattr(config, 'SCHEDULER_FACTOR', 0.5)),
-        'scheduler_patience'        : int(getattr(config, 'SCHEDULER_PATIENCE', 3)),
+        'scheduler_factor'          : float((training_config or {}).get('scheduler', {}).get('factor', getattr(config, 'SCHEDULER_FACTOR', 0.5))),
+        'scheduler_patience'        : int((training_config or {}).get('scheduler', {}).get('patience', getattr(config, 'SCHEDULER_PATIENCE', 3))),
         'threshold'                 : float(runtime.THRESHOLD),
         'number_of_workers'         : int(runtime.NUMBBER_OF_WORKERS),
         'use_amp'                   : bool(runtime.USE_AMP),
