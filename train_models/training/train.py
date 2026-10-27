@@ -128,10 +128,16 @@ def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler):
         with torch.autocast(
             device_type=device.type,
             dtype=torch.float16,
-            enabled=bool(runtime.USE_AMP and device.type == 'cuda')
+            enabled=runtime.USE_AMP
         ):
             logits = model(images)
-            loss = criterion(logits, targets)
+
+        # Tính loss ở FP32
+        with torch.autocast(
+            device_type=device.type,
+            enabled=False
+        ):
+            loss = criterion(logits.float(), targets.float())
 
         if not torch.isfinite(loss).item():
             raise FloatingPointError(

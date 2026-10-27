@@ -31,20 +31,20 @@ NUMBBER_OF_WORKERS          = 8                                                 
 IMAGE_SIZE                  = 224
 
 
-BATCH_SIZE                  = 32 #16
-GRAD_ACCUM_STEPS            = 1                                                                         # Hệ số batch size / epoch
+BATCH_SIZE                  = 8
+GRAD_ACCUM_STEPS            = 2                                                                        # Hệ số batch size / epoch
 
 SEED                        = 42
 
 EPOCHS                      = 30
-LEARNING_RATE               = 0.001
-WEIGHT_DECAY                = 0
+LEARNING_RATE               = 0.0001
+WEIGHT_DECAY                = 0.0005
 PATIENCE                    = 5
 THRESHOLD                   = 0.5
 
 USE_AMP                     = True
 SCHEDULER_PATIENCE          = 3
-SCHEDULER_FACTOR            = 0.1
+SCHEDULER_FACTOR            = 0.5
 MIN_DELTA                   = 0
 
 # Cấu hình tái lập
