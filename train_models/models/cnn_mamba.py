@@ -97,8 +97,8 @@ class CNNMamba(nn.Module):
 
 LOSS_CONFIG = {
     "name": "asl",
-    "gamma_neg": 4.0,
-    "gamma_pos": 0.0,
+    "gamma_negative": 4.0,
+    "gamma_positive": 0.0,
     "clip": 0.05,
 }
 

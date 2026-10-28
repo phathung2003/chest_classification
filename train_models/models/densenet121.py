@@ -42,8 +42,8 @@ class DenseNetBaseline(nn.Module):
 # Loss: GIỮ NGUYÊN ASL như mô hình CNN-BiMamba để so sánh công bằng
 LOSS_CONFIG = {
     "name": "asl",
-    "gamma_neg": 4.0,
-    "gamma_pos": 0.0,
+    "gamma_negative": 4.0,
+    "gamma_positive": 0.0,
     "clip": 0.05,
 }
 
