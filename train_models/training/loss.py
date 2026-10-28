@@ -152,10 +152,10 @@ def build_sigmoid_focal_Loss(config):
     
     # Kiểm tra giá trị
     if gamma < 0:
-        raise ValueError(f"Sigmoid Focal Loss: gamma phải >= 0, nhưng giá trị nhận được là {gamma}.")
+        raise ValueError(f"Sigmoid Focal Loss: Giá trị gamma phải >= 0, nhưng giá trị nhận được là {gamma}.")
 
     if alpha is not None and not (0 <= alpha <= 1):
-        raise ValueError(f"Sigmoid Focal Loss: phải nằm trong khoảng [0, 1] hoặc None, nhưng giá trị nhận được là {alpha}.")
+        raise ValueError(f"Sigmoid Focal Loss: Giá trị alpha phải nằm trong khoảng [0, 1] hoặc None, nhưng giá trị nhận được là {alpha}.")
     
     # Dựng hàm Sigmoid Focal Loss
     class SigmoidFocalLoss(nn.Module):
@@ -209,13 +209,13 @@ def build_asymmetric_loss(config):
     
     # Kiểm tra giá trị
     if gamma_negative < 0:
-        raise ValueError(f"Asymmetric Loss: gamma_negative phải >= 0, nhưng giá trị nhận được là {gamma_negative}.")
+        raise ValueError(f"Asymmetric Loss: Giá trị gamma_negative phải >= 0, nhưng giá trị nhận được là {gamma_negative}.")
 
     if gamma_positive < 0:
-        raise ValueError(f"Asymmetric Loss: gamma_positive phải >= 0, nhưng giá trị nhận được là {gamma_positive}.")
+        raise ValueError(f"Asymmetric Loss: Giá trị gamma_positive phải >= 0, nhưng giá trị nhận được là {gamma_positive}.")
 
     if not (0 <= clip <= 1):
-        raise ValueError(f"Asymmetric Loss: clip phải thuộc [0, 1], nhưng giá trị nhận được là {clip}.")
+        raise ValueError(f"Asymmetric Loss: Giá trị clip phải thuộc [0, 1], nhưng giá trị nhận được là {clip}.")
     
     # Dựng hàm Asymmetric Loss
     class AsymmetricLoss(nn.Module):
