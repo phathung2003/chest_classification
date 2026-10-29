@@ -12,7 +12,7 @@ from utilities.log import print_heading, print_message
 # Chọn thiết bị huấn luyện và in thông tin GPU
 def device_info():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print_heading("Thiết bị")
+    print_heading("Thông số thiết bị")
     print_message("Huấn luyện trên", "GPU CUDA" if device.type == "cuda" else "CPU")
     if device.type == "cuda":
         print_message("GPU sử dụng", torch.cuda.get_device_name(0))

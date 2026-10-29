@@ -15,33 +15,28 @@ import config
 
 
 # ============================================================
-# Định dạng thông báo console (notebook tiền xử lý cũng dùng các hàm này)
+# Định dạng thông báo console
 def print_heading(title):
     print("=" * config.CONSOLE_WIDTH)
     print(title)
     print("=" * config.CONSOLE_WIDTH)
 
-
 def print_title(title):
     print(title)
     print("-" * config.CONSOLE_WIDTH)
 
-
 def print_result(RESULT, TITLE, MESSAGE):
     print(f"{RESULT:<{config.MIN_RESULT_WIDTH}} {TITLE:<{config.MIN_TITLE_WIDTH}}: {MESSAGE}")
-
 
 def print_message(TITLE, MESSAGE):
     print(f"{TITLE:<{config.MIN_TITLE_WIDTH}}: {MESSAGE}")
 
 
 # ============================================================
-# Thanh tiến trình có dấu phân cách hàng nghìn (1,234/5,678)
+# Thanh tiến trình (Có dấu phân cách hàng nghìn)
 class TqdmComma(tqdm):
     @staticmethod
     def format_meter(n, total, elapsed, **kwargs):
-        # tqdm cắt dòng vừa đúng độ rộng terminal; dấu phẩy chèn sau đó làm dòng dài hơn --> terminal tự xuống dòng,
-        # mỗi lần vẽ lại nhảy một dòng. Vì vậy chừa sẵn chỗ cho dấu phẩy (và 1 cột cho terminal Windows) trước khi tqdm tính độ rộng
         ncols = kwargs.get("ncols")
         plain, grouped = (f"{int(n)}/{int(total)}", f"{int(n):,}/{int(total):,}") if total is not None else ("", "")
         if ncols:
@@ -49,14 +44,12 @@ class TqdmComma(tqdm):
         text = tqdm.format_meter(n = n, total = total, elapsed = elapsed, **kwargs)
         if total is not None:
             text = text.replace(plain, grouped, 1)
-        # Đơn vị " batch" có khoảng trắng để hiện "8.32 batch/s"; khi chậm hơn 1 batch/s tqdm đảo thành "2.39 s/batch"
         text = text.replace("s/ batch", " s/batch")
         return disp_trim(text, ncols - 1) if ncols else text
 
 
 # ============================================================
-# Theo dõi GPU bằng một luồng nền (lấy mẫu mỗi giây, không làm chậm vòng huấn luyện).
-# Nguồn: pynvml nếu đã cài (pip install nvidia-ml-py), nếu không thì nvidia-smi, cuối cùng là bộ nhớ từ PyTorch.
+# Theo dõi GPU
 class GPUMonitor:
     _instance = None
 
@@ -129,22 +122,17 @@ class GPUMonitor:
             parts.append(f"VRAM {s['memory_used_mb'] / 1024:,.2f}/{s['memory_total_mb'] / 1024:,.2f} GB")
         return " | ".join(parts)
 
-
 # ============================================================
-# Thanh tiến trình cho huấn luyện / đánh giá: số batch có dấu phẩy hàng nghìn, kèm GPU usage và VRAM.
-# KHÔNG dùng tqdm.auto: lớp tqdm_asyncio gọi iter(loader) ngay khi khởi tạo, tạo thêm một iterator DataLoader
-# thừa mỗi epoch (thêm một bộ worker nạp ảnh rồi bỏ, chậm gần gấp đôi lúc đầu epoch, và lệch seed của loader).
+# Thanh tiến trình cho huấn luyện / đánh giá
 def progress_bar(iterable, description, device):
-    # Xuống một dòng trước khi vẽ thanh, in đúng một lần (đặt "\n" trong nhãn sẽ làm mỗi lần vẽ lại nhảy thêm một dòng).
-    # Ghi "\r\n" ra stderr như tqdm: chỉ hiện trên màn hình, run.log bỏ qua mọi đoạn có "\r" nên không có dòng trống
     sys.stdout.flush()
     sys.stderr.write("\r\n")
     bar = TqdmComma(iterable, desc = description, unit = " batch", leave = False, dynamic_ncols = True)
     bar.gpu_monitor = GPUMonitor.get() if device.type == "cuda" else None
     return bar
 
-
-# Cập nhật phần đuôi thanh tiến trình (không ép vẽ lại; tqdm tự giới hạn tần suất vẽ)
+# ============================================================
+# Cập nhật phần đuôi thanh tiến trình
 def update_progress(bar, **values):
     parts = [f"{key} {value:,.4f}" if isinstance(value, float) else f"{key} {value:,}" for key, value in values.items()]
     if bar.gpu_monitor is not None:
@@ -153,16 +141,14 @@ def update_progress(bar, **values):
             parts.append(gpu_text)
     bar.set_postfix_str(" | ".join(parts), refresh = False)
 
-
 # ============================================================
-# Thời điểm hiện tại theo giờ địa phương, có múi giờ (dùng làm mốc trong log)
+# Thời gian hiện tại
 def timestamp():
     return datetime.now(timezone.utc).astimezone().isoformat(timespec = "seconds")
 
-
 # ============================================================
-# Luồng ghi kép: vừa in ra console, vừa ghi vào run.log (bỏ qua các lần vẽ lại thanh tiến trình)
-class _RunLogStream:
+# Ghi Log
+class RunLogStream:
     def __init__(self, console, log_file, lock):
         self.console = console
         self.log_file = log_file
@@ -206,7 +192,7 @@ class _RunLogStream:
 
 
 # ============================================================
-# Ghi toàn bộ output của một lần khởi chạy vào run.log (nối tiếp khi chạy lại) và in cấu hình ở đầu
+# In thông số lần chạy
 @contextmanager
 def capture_run_log(run_directory, *, model_name, dataset_name, train_df, test_df, folds, settings, signature, launch):
     run_directory = Path(run_directory)
@@ -217,8 +203,8 @@ def capture_run_log(run_directory, *, model_name, dataset_name, train_df, test_d
 
     with log_path.open("a", encoding = "utf-8", buffering = 1) as file:
         mutex = threading.RLock()
-        stdout_mirror = _RunLogStream(old_stdout, file, mutex)
-        stderr_mirror = _RunLogStream(old_stderr, file, mutex)
+        stdout_mirror = RunLogStream(old_stdout, file, mutex)
+        stderr_mirror = RunLogStream(old_stderr, file, mutex)
         sys.stdout, sys.stderr = stdout_mirror, stderr_mirror
 
         try:
@@ -248,47 +234,51 @@ def capture_run_log(run_directory, *, model_name, dataset_name, train_df, test_d
 
 # ============================================================
 # Đầu log: lượt chạy, dữ liệu, cấu hình (lấy từ settings, tức đúng những gì nằm trong chữ ký) và trạng thái Git
-def _print_run_header(run_directory, resumed_log, model_name, dataset_name, train_df, test_df, folds,
-                      settings, signature, launch):
+def _print_run_header(run_directory, resumed_log, model_name, dataset_name, train_df, test_df, folds, settings, signature, launch):
     tc = settings["training_config"]
 
     print("\n" + "=" * config.CONSOLE_WIDTH)
-    print(f"[{timestamp()}] {'TIẾP TỤC' if resumed_log else 'BẮT ĐẦU'} HUẤN LUYỆN | {model_name} | {run_directory.name}")
-    print("=" * config.CONSOLE_WIDTH)
-    print_message("Thư mục lượt chạy", run_directory)
-    print_message("Chữ ký cấu hình", signature[:16])
-    print_message("Git commit", f"{launch['git_commit']} ({launch['git_branch']})")
-    if launch["git_dirty"]:
-        print_message("CẢNH BÁO", f"{len(launch['git_dirty_files'])} tệp chưa commit (danh sách trong train_info.json)")
-    print()
-
-    print_heading("Tập dữ liệu")
-    print_message("Tên", dataset_name)
-    print_message("Số ảnh", f"Huấn luyện / Validation: {len(train_df):,} | Test: {len(test_df):,}")
-    print_message("Số fold / fold chạy lần này", f"{settings['number_of_folds']} / {folds}")
+    print(f"[{timestamp()}] {'TIẾP TỤC' if resumed_log else 'BẮT ĐẦU'} HUẤN LUYỆN | Lần chạy thứ: {run_directory.name.removeprefix('run_')}")
+    print_message("Model", model_name)
+    print_message("Tên tập dữ liệu", dataset_name)
+    print_message("Số ảnh", f"Huấn luyện / Validation: {len(train_df):,} | Test: {len(test_df):,}\n")
+    
+    # Thông tin tập dữ liệu
+    print_heading("Cấu hình tập dữ liệu (Ứng với cài đặt trong file config.py)")
+    print_message("Tổng số Fold được chia", settings['number_of_folds'])
+    print_message("Fold được chọn", folds)
     print_message("Số lớp", len(settings["classes"]))
     print_message("Kích cỡ ảnh", f"{settings['image_size']}\n")
 
-    print_heading("Cấu hình huấn luyện")
-    print_message("Hàm Loss", settings["loss_config"])
-    print_message("Optimizer", tc["optimizer"])
-    print_message("Scheduler", tc["scheduler"])
-    print_message("Tiêu chí chọn mô hình", tc["selection_metric"])
+    # Cấu hình huấn luyện
+    print_heading("Cấu hình huấn luyện (Ứng với cài đặt trong file config.py)")
     print_message("Batch size", tc["batch_size"])
+    print_message("Gradient accum step", tc['grad_accum_steps'])
+    print_message("Gradient clip norm", tc['grad_clip_norm'])
+    print_message("Number of worker", settings['number_of_workers'])
+    print_message("Prefetch factor", config.PREFETCH_FACTOR)
     print_message("Số epoch tối đa", tc["epochs"])
-    print_message("Early stopping", f"patience={tc['early_stop_patience']}, min_delta={tc['min_delta']}")
-    print_message("Gradient", f"accum_steps={tc['grad_accum_steps']}, clip_norm={tc['grad_clip_norm']}")
-    print_message("Mixed precision (AMP)", settings["use_amp"])
-    print_message("Ngưỡng mặc định", settings["threshold"])
-    print_message("Số worker", f"{settings['number_of_workers']}\n")
-
-    print_heading("Làm giàu ảnh")
+    print_message("Patience", tc['early_stop_patience'])
+    print_message("Min delta", tc['min_delta'])
+    print_message("Threshold", f"{settings['threshold']}\n")
+    
+    # Cấu hình hàm huấn luyện
+    print_heading("Cấu hình hàm huấn luyện (Ứng với cài đặt trong file config.py)")
+    print_message("Hàm Loss", settings["loss_config"])
+    print_message("Hàm Optimizer", tc["optimizer"])
+    print_message("Hàm Scheduler", tc["scheduler"])
+    print_message("Tiêu chí chọn mô hình", f"{tc['selection_metric']}\n")
+    
+    # Hàm làm giàu ảnh
+    print_heading("Cấu hình hàm làm giàu ảnh (Ứng với cài đặt trong file config.py)")
     for key, value in settings["augmentation"].items():
         print_message(key, value)
     print()
-
-    print_heading("Tái lập")
+    
+    # Cấu hình biến ngẫu nhiên
+    print_heading("Cấu hình biến ngẫu nhiên (Ứng với cài đặt trong file config.py)")
     print_message("Seed", settings["seed"])
+    print_message("Use AMP", settings["use_amp"])
     print_message("cuDNN deterministic", settings["cudnn_deterministic"])
     print_message("cuDNN benchmark", settings["cudnn_benchmark"])
     print_message("Deterministic algorithms", f"{settings['deterministic_algorithms']}\n")
@@ -302,26 +292,35 @@ def print_model_specification(specification):
     print_message("Trainable parameters", f"{specification['trainable_parameters']:,}")
     print_message("MACs (1 ảnh)", f"{specification['macs']:,}")
     print_message("FLOPs (1 ảnh)", f"{specification['flops']:,}")
-    print_message("Độ trễ suy luận (batch 1)", f"{specification['inference_latency_ms_batch_1']:.2f} ms "
-                                               f"({specification['inference_precision']})")
+    print_message("Độ trễ suy luận (batch 1)", f"{specification['inference_latency_ms_batch_1']:.2f} ms ({specification['inference_precision']})")
     print_message(f"Throughput (batch {specification['inference_batch_size']})", f"{specification['inference_images_per_second']:,.0f} ảnh/s")
+
 # ============================================================
 # Tóm tắt chỉ số Test trên một dòng (chi tiết nằm trong test_summary.json)
 def print_test_summary(title, summary):
     ci = summary.get("macro_auroc_ci95")
     ci_text = f" [95% CI {ci[0]:.4f}, {ci[1]:.4f}]" if ci and None not in ci else ""
     loss = summary.get("test_loss")
-    line = (f"{title} | Macro AUROC {summary['macro_auroc']:.4f}{ci_text} | Macro AP {summary['macro_ap']:.4f} | "
-            f"Macro F1@{summary['threshold']:g} {summary['macro_f1']:.4f}")
+    
+    
+    print(f"\n === Kết quả {title} ===")
+    
+    print_message("Threshold", f"{summary['threshold']:.4f}")
+    
     if loss is not None:
-        line += f" | Loss {loss:.4f}"
-    if "postprocessed" in summary:
-        line += f" | Macro F1 (ngưỡng theo lớp) {summary['postprocessed']['macro_f1']:.4f}"
-    print(line)
+        print_message("Loss", f"{loss}")
+            
+    print_message("Macro AUROC", f"{summary['macro_auroc']}")       
+    print_message("Macro AP", f"{summary['macro_ap']}")       
+    print_message("Macro Precision", f"{summary['macro_precision']}")        
+    print_message("Macro Recall", f"{summary['macro_recall']}")     
+    print_message("Macro F1", f"{summary['macro_f1']}")
+    print_message("Micro F1", f"{summary['micro_f1']}")
+    print_message("Weighted F1", f"{summary['weighted_f1']}")
 
 
 # ============================================================
-# Tổng kết cuối lượt chạy: Validation từng fold, mean ± std trên Validation và Test, ensemble
+# Tổng kết cuối lượt chạy
 def print_run_summary(cv_frame, test_report = None):
     def mean_std(values):
         values = values.dropna()

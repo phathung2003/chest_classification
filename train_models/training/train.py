@@ -61,10 +61,20 @@ def load_best_weights(ctx, best_path, model, fold):
 
 # ============================================================
 # Lưu lịch sử epoch
+HISTORY_COLUMNS = [
+    "fold", "epoch", "no_improvement",
+    "elapsed_seconds", "data_wait_seconds", "peak_gpu_memory_gb", "train_seconds", "train_images_per_second",
+    "learning_rate", "grad_norm_mean", "grad_norm_max", "amp_skipped_steps",
+    "train_loss", "train_accuracy", "train_auroc",
+    "validation_seconds", "validation_loss", "macro_auroc", "macro_ap", "macro_precision", "macro_recall", "macro_f1", "micro_f1", "weighted_f1",
+]
+
 def save_history(fold_directory, history, classes):
     frame = pd.DataFrame(history)
     class_columns = [f"auroc_{name}" for name in classes if f"auroc_{name}" in frame]
-    save_csv(fold_directory / "history.csv", frame.drop(columns = class_columns))
+    epoch_frame = frame.drop(columns = class_columns)
+    ordered = [c for c in HISTORY_COLUMNS if c in epoch_frame] + [c for c in epoch_frame if c not in HISTORY_COLUMNS]
+    save_csv(fold_directory / "history.csv", epoch_frame[ordered])
     if class_columns:
         class_frame = frame[["epoch", *class_columns]].rename(columns = lambda c: c.removeprefix("auroc_"))
         save_csv(fold_directory / "history_class_auroc.csv", class_frame)
@@ -201,7 +211,7 @@ def train_one_fold(ctx, fold, train_folds_df):
         print(f"Fold {fold} đã hoàn thành trước đó (epoch tốt nhất: {done['result']['best_epoch']})")
         return model, criterion, done["result"]
 
-    print(f"\n[{timestamp()}] === FOLD {fold} | Huấn luyện: {len(train_df):,} ảnh | Validation: {len(validation_df):,} ảnh ===")
+    print(f"\n=== FOLD {fold} | Huấn luyện: {len(train_df):,} ảnh | Validation: {len(validation_df):,} ảnh ===")
 
     # 2. Khởi tạo (seed riêng cho từng fold: khởi tạo không phụ thuộc vào các fold chạy trước)
     set_seed(int(config.SEED) + fold)
@@ -290,15 +300,16 @@ def train_one_fold(ctx, fold, train_folds_df):
 
         # Một dòng mỗi epoch (accuracy theo nhãn, chuẩn gradient và các chỉ số khác nằm trong history.csv)
         data_share = train_stats["data_wait_seconds"] / max(train_stats["train_seconds"], 1e-9)
-        print(f"Epoch {epoch:02d} | Train: Loss {train_stats['train_loss']:.4f}, AUROC {train_stats['train_auroc']:.4f} | "
-              f"Validation: Loss {validation_loss:.4f}, AUROC {auc:.4f}, AP {metrics['macro_ap']:.4f} | "
-              f"Learning rate {learning_rate:.1e} | {time.perf_counter() - started:.0f}s "
-              f"({train_stats['train_images_per_second']:.0f} ảnh/s, chờ dữ liệu {data_share:.0%}) | "
+        print(f"Epoch {epoch:02d} | Train: [Loss: {train_stats['train_loss']:.4f}, Macro AUROC: {train_stats['train_auroc']:.4f}] | "
+              f"Validation: [Loss: {validation_loss:.4f}, Macro AUROC {auc:.4f}, AP {metrics['macro_ap']:.4f}] | "
+              f"Learning rate: {learning_rate:.1e} | Time: {time.perf_counter() - started:.0f}s ({train_stats['train_images_per_second']:.0f} ảnh/s, chờ dữ liệu {data_share:.0%}) | "
               + ("[Mô hình tốt nhất]" if improved
                  else f"Không cải thiện {no_improvement}/{tc['early_stop_patience']} "
-                      f"(tốt nhất {best_score:.4f} ở epoch {best_epoch})"))
-        if next_learning_rate < learning_rate:
+                      f"(Tốt nhất {selection_metric}: {best_score:.4f} ở epoch {best_epoch})"))
+        
+        if next_learning_rate < learning_rate and finished != True:
             print(f"Scheduler giảm learning rate: {learning_rate:.1e} -> {next_learning_rate:.1e}")
+        
         if not math.isfinite(train_stats["grad_norm_max"]):
             print("CẢNH BÁO: mọi bước cập nhật trong epoch đều bị AMP bỏ qua (gradient tràn số FP16)")
 
@@ -319,7 +330,7 @@ def finalize_fold(ctx, fold, model, criterion, validation_df, best_path, history
     best = load_best_weights(ctx, best_path, model, fold)
 
     _, loader = create_dataloader(ctx.dataset_class, ctx.classes, ctx.device, validation_df, ctx.eval_transform, False, batch_size = ctx.batch_size, seed = int(config.SEED) + fold * 100_000 + 90_000)
-    _, metrics, targets, probabilities = evaluate(ctx.device, ctx.number_of_classes, model, loader, criterion)
+    loss, metrics, targets, probabilities = evaluate(ctx.device, ctx.number_of_classes, model, loader, criterion)
 
     # Lý do dừng và tổng thời gian huấn luyện (lấy từ lịch sử epoch)
     stopped_early = history[-1]["no_improvement"] >= ctx.training_config["early_stop_patience"]
@@ -332,6 +343,7 @@ def finalize_fold(ctx, fold, model, criterion, validation_df, best_path, history
         "train_images_per_second" : float(np.mean([row["train_images_per_second"] for row in history])),
         "peak_gpu_memory_gb"    : max((row["peak_gpu_memory_gb"] or 0.0) for row in history) or None,
         "amp_skipped_steps"     : int(sum(row["amp_skipped_steps"] for row in history)),
+        "loss"                  : loss,
         "best_macro_auroc"      : float(metrics["macro_auroc"]),
         "best_selection_metric" : best["selection_metric"],
         "best_selection_score"  : float(best["selection_score"]),
@@ -342,7 +354,7 @@ def finalize_fold(ctx, fold, model, criterion, validation_df, best_path, history
     save_history(fold_directory, history, ctx.classes)
     save_json(fold_directory / "fold_done.json", {"signature": ctx.signature, "result": result})
 
-    print(f"[{timestamp()}] Kết thúc Fold {fold} | {'Early stopping' if stopped_early else 'Đủ số epoch tối đa'} "
-          f"sau {len(history)} epoch, {result['training_minutes']:.1f} phút | Epoch tốt nhất {result['best_epoch']} | "
-          f"Validation macro AUROC {result['macro_auroc']:.4f}, macro AP {result['macro_ap']:.4f}")
+    print(f"\nKết thúc Fold {fold} | {'Early stopping' if stopped_early else 'Đủ số epoch tối đa'} sau {len(history)} epoch, {result['training_minutes']:.0f} phút | "
+          f"Epoch tốt nhất {result['best_epoch']} | Validation [Loss: {result['loss']:.4f}, Macro AUROC {result['macro_auroc']:.4f}, Macro AP {result['macro_ap']:.4f}]")
+    
     return result
