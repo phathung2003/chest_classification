@@ -1,66 +1,156 @@
-# Khai báo utilities
-import sys
-from pathlib import Path
-from tqdm import tqdm   
-from config import MIN_RESULT_WIDTH, MIN_TITLE_WIDTH
-import torch
-from thop import profile
-import config
-
-def print_heading(title):
-    print("=" * 100)
-    print(title)
-    print("=" * 100)
-
-def print_title(title):
-    print(title)
-    print("-" * 100)
-    
-def print_result(RESULT, TITLE, MESSAGE):
-    print(f"{RESULT:<{MIN_RESULT_WIDTH}} {TITLE:<{MIN_TITLE_WIDTH}}: {MESSAGE}")
-
-def print_message(TITLE, MESSAGE):
-    print(f"{TITLE:<{MIN_TITLE_WIDTH}}: {MESSAGE}")
-
-class TqdmComma(tqdm):
-
-    @staticmethod
-    def format_meter(n, total, elapsed, **kwargs):
-
-        text = tqdm.format_meter(
-            n=n,
-            total=total,
-            elapsed=elapsed,
-            **kwargs
-        )
-
-        if total is not None:
-
-            old_value = f"{int(n)}/{int(total)}"
-            new_value = f"{int(n):,}/{int(total):,}"
-            text = text.replace(old_value, new_value)
-
-        return text
-
-# ============================================================
-# One durable, append-only text log per experiment run.
-# Keep the existing print_heading / print_message functions unchanged.
 import os
+import subprocess
 import sys
 import threading
+import time
 import traceback
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
+
+from tqdm import tqdm
+
+import config
 
 
-def _log_timestamp():
-    # Local timestamp with timezone offset, convenient for audit/research logs.
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec='seconds')
+# ============================================================
+# Định dạng thông báo console (notebook tiền xử lý cũng dùng các hàm này)
+def print_heading(title):
+    print("=" * config.CONSOLE_WIDTH)
+    print(title)
+    print("=" * config.CONSOLE_WIDTH)
 
 
+def print_title(title):
+    print(title)
+    print("-" * config.CONSOLE_WIDTH)
+
+
+def print_result(RESULT, TITLE, MESSAGE):
+    print(f"{RESULT:<{config.MIN_RESULT_WIDTH}} {TITLE:<{config.MIN_TITLE_WIDTH}}: {MESSAGE}")
+
+
+def print_message(TITLE, MESSAGE):
+    print(f"{TITLE:<{config.MIN_TITLE_WIDTH}}: {MESSAGE}")
+
+
+# ============================================================
+# Thanh tiến trình có dấu phân cách hàng nghìn (1,234/5,678)
+class TqdmComma(tqdm):
+    @staticmethod
+    def format_meter(n, total, elapsed, **kwargs):
+        text = tqdm.format_meter(n = n, total = total, elapsed = elapsed, **kwargs)
+        if total is not None:
+            text = text.replace(f"{int(n)}/{int(total)}", f"{int(n):,}/{int(total):,}")
+        # Đơn vị " batch" có khoảng trắng để hiện "8.32 batch/s"; khi chậm hơn 1 batch/s tqdm đảo thành "2.39 s/batch"
+        return text.replace("s/ batch", " s/batch")
+
+
+# ============================================================
+# Theo dõi GPU bằng một luồng nền (lấy mẫu mỗi giây, không làm chậm vòng huấn luyện).
+# Nguồn: pynvml nếu đã cài (pip install nvidia-ml-py), nếu không thì nvidia-smi, cuối cùng là bộ nhớ từ PyTorch.
+class GPUMonitor:
+    _instance = None
+
+    def __init__(self, device_index = 0, interval = None):
+        self.device_index = device_index
+        self.interval = config.GPU_MONITOR_INTERVAL if interval is None else interval
+        self.snapshot = {"utilization": None, "memory_used_mb": None, "memory_total_mb": None}
+        self._reader = self._make_reader()
+        threading.Thread(target = self._loop, daemon = True, name = "gpu-monitor").start()
+
+    # Một monitor dùng chung cho cả tiến trình
+    @classmethod
+    def get(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    # Chọn nguồn đọc số liệu GPU
+    def _make_reader(self):
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
+
+            def read_nvml():
+                memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                return (pynvml.nvmlDeviceGetUtilizationRates(handle).gpu,
+                        memory.used / 1024 ** 2, memory.total / 1024 ** 2)
+            return read_nvml
+        except Exception:
+            pass
+
+        def read_nvidia_smi():
+            output = subprocess.run(
+                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total",
+                 "--format=csv,noheader,nounits", "-i", str(self.device_index)],
+                capture_output = True, text = True, timeout = 5,
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+            utilization, used, total = (float(v) for v in output.strip().split(","))
+            return utilization, used, total
+
+        try:
+            read_nvidia_smi()
+            return read_nvidia_smi
+        except Exception:
+            pass
+
+        def read_torch():
+            import torch
+            free, total = torch.cuda.mem_get_info(self.device_index)
+            return None, (total - free) / 1024 ** 2, total / 1024 ** 2
+        return read_torch
+
+    def _loop(self):
+        while True:
+            try:
+                utilization, used, total = self._reader()
+                self.snapshot = {"utilization": utilization, "memory_used_mb": used, "memory_total_mb": total}
+            except Exception:
+                pass
+            time.sleep(self.interval)
+
+    # Chuỗi hiển thị: "GPU 97% | VRAM 5.00/8.00 GB"
+    def text(self):
+        s = self.snapshot
+        parts = []
+        if s["utilization"] is not None:
+            parts.append(f"GPU {s['utilization']:.0f}%")
+        if s["memory_used_mb"] is not None:
+            parts.append(f"VRAM {s['memory_used_mb'] / 1024:,.2f}/{s['memory_total_mb'] / 1024:,.2f} GB")
+        return " | ".join(parts)
+
+
+# ============================================================
+# Thanh tiến trình cho huấn luyện / đánh giá: số batch có dấu phẩy hàng nghìn, kèm GPU usage và VRAM.
+# KHÔNG dùng tqdm.auto: lớp tqdm_asyncio gọi iter(loader) ngay khi khởi tạo, tạo thêm một iterator DataLoader
+# thừa mỗi epoch (thêm một bộ worker nạp ảnh rồi bỏ, chậm gần gấp đôi lúc đầu epoch, và lệch seed của loader).
+def progress_bar(iterable, description, device):
+    bar = TqdmComma(iterable, desc = description, unit = " batch", leave = False, dynamic_ncols = True)
+    bar.gpu_monitor = GPUMonitor.get() if device.type == "cuda" else None
+    return bar
+
+
+# Cập nhật phần đuôi thanh tiến trình (không ép vẽ lại; tqdm tự giới hạn tần suất vẽ)
+def update_progress(bar, **values):
+    parts = [f"{key} {value:,.4f}" if isinstance(value, float) else f"{key} {value:,}" for key, value in values.items()]
+    if bar.gpu_monitor is not None:
+        gpu_text = bar.gpu_monitor.text()
+        if gpu_text:
+            parts.append(gpu_text)
+    bar.set_postfix_str(" | ".join(parts), refresh = False)
+
+
+# ============================================================
+# Thời điểm hiện tại theo giờ địa phương, có múi giờ (dùng làm mốc trong log)
+def timestamp():
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec = "seconds")
+
+
+# ============================================================
+# Luồng ghi kép: vừa in ra console, vừa ghi vào run.log (bỏ qua các lần vẽ lại thanh tiến trình)
 class _RunLogStream:
-    """Mirror stdout/stderr to a run log without recording tqdm redraws."""
-
     def __init__(self, console, log_file, lock):
         self.console = console
         self.log_file = log_file
@@ -70,17 +160,13 @@ class _RunLogStream:
         if not isinstance(value, str):
             value = str(value)
         with self.lock:
-            # Always keep the original terminal/notebook output visible.
             self.console.write(value)
-            # tqdm repeatedly redraws progress bars using carriage returns;
-            # recording each redraw would create huge, unreadable log files.
-            if value and '\r' not in value:
+            # tqdm vẽ lại bằng ký tự '\r'; ghi mọi lần vẽ lại sẽ làm log phình to
+            if value and "\r" not in value:
                 self.log_file.write(value)
                 self.log_file.flush()
-                # Durability at completed line boundaries (epoch summaries,
-                # warnings and exception lines). Also survives abrupt exit much
-                # better than a buffered-only stream.
-                if '\n' in value:
+                # Đồng bộ xuống đĩa ở cuối mỗi dòng để log còn nguyên khi chương trình dừng đột ngột
+                if "\n" in value:
                     os.fsync(self.log_file.fileno())
         return len(value)
 
@@ -97,97 +183,49 @@ class _RunLogStream:
 
     @property
     def encoding(self):
-        return getattr(self.console, 'encoding', 'utf-8')
+        return getattr(self.console, "encoding", "utf-8")
 
     @property
     def errors(self):
-        return getattr(self.console, 'errors', 'replace')
+        return getattr(self.console, "errors", "replace")
 
     def writable(self):
         return True
 
 
+# ============================================================
+# Ghi toàn bộ output của một lần khởi chạy vào run.log (nối tiếp khi chạy lại) và in cấu hình ở đầu
 @contextmanager
-def capture_run_log(run_directory, *, model_name, dataset_name, train_df, test_df, folds, include_final, settings):
+def capture_run_log(run_directory, *, model_name, dataset_name, train_df, test_df, folds, settings, signature, launch):
     run_directory = Path(run_directory)
-    run_directory.mkdir(parents=True, exist_ok=True)
-    log_path = run_directory / 'run.log'
+    run_directory.mkdir(parents = True, exist_ok = True)
+    log_path = run_directory / "run.log"
     resumed_log = log_path.is_file() and log_path.stat().st_size > 0
     old_stdout, old_stderr = sys.stdout, sys.stderr
-    
-    with log_path.open('a', encoding='utf-8', buffering=1) as file:
+
+    with log_path.open("a", encoding = "utf-8", buffering = 1) as file:
         mutex = threading.RLock()
         stdout_mirror = _RunLogStream(old_stdout, file, mutex)
         stderr_mirror = _RunLogStream(old_stderr, file, mutex)
         sys.stdout, sys.stderr = stdout_mirror, stderr_mirror
-        
-        
+
         try:
-            status = 'TIẾP TỤC HUẤN LUYỆN' if resumed_log else 'BẮT ĐẦU HUẤN LUYỆN'
-            run_no = int(run_directory.name.split("_")[-1])
-            
-            print('\n' + '=' * 100)
-            print(f'[{_log_timestamp()}] {status} | Lần chạy thứ: {run_no}')
-            print(f'Model: {model_name}')
-            print(f"Hàm mất mát sử dụng: {settings['loss_name']}")
-            print(f"Tên tập dữ liệu: {dataset_name}")
-            print(f"Số lượng dữ liệu: Huấn luyện/Kiểm thử: {len(train_df):,} ảnh | Kiểm tra: {len(test_df):,} ảnh")
-            print('=' * 100 + '\n')
-            
-            print_heading("Cấu hình tập dữ liệu (Ứng với cài đặt trong file config.py)")
-            print(f"Tổng số fold được chia          : {settings['number_of_folds']}")
-            print(f"Fold được chọn                  : {folds}")
-            print(f"Các lớp trong tập dữ liệu       : {settings['classes']}")
-            print(f"Kích cỡ ảnh                     : {settings['image_size']}\n")
-            
-            print_heading("Cấu hình huấn luyện (Ứng với cài đặt trong file config.py)")
-            print(f"Huấn luyện mô hình cuối cùng    : {'Có' if include_final else 'Không'}")
-            print(f"Batch size                      : {settings['batch_size']}")
-            tc = settings.get('training_config') or {}
-            print(f"Optimizer                       : {tc.get('optimizer', {}).get('name', 'adamw') if not settings.get('optimizer_factory_hash') else 'custom factory'}")
-            print(f"Optimizer config                : {tc.get('optimizer', {})}")
-            print(f"Scheduler config                : {tc.get('scheduler', {})}")
-            print(f"Best model criterion            : {tc.get('selection_metric', 'macro_auroc')}")
-            print(f"Augmentation profile            : {tc.get('augmentation', 'default')}")
-            print(f"Patience                        : {settings['patience']}")
-            print(f"Number of worker                : {settings['number_of_workers']}")
-            
-            print(f"Learning rate                   : {settings['learning_rate']}")
-            print(f"Weight decay                    : {settings['weight_decay']}")
-            print(f"Min delta                       : {settings['min_delta']}")
-            print(f"Scheduler patience              : {settings['scheduler_patience']}")
-            print(f"Scheduler factor                : {settings['scheduler_factor']}")
-            print(f"Threshold                       : {settings['threshold']}\n")
-            
-            print_heading("Cấu hình làm giàu ảnh (Ứng với cài đặt trong file config.py)")
-            print(f"Degrees                         : {settings['degrees']}")
-            print(f"Scale                           : {settings['scale']}")
-            print(f"Translate                       : {settings['translate']}")
-            print(f"Normalize mean                  : {settings['normalize_mean']}")
-            print(f"Normalize standard deviation    : {settings['normalize_std']}\n")
-            
-            print_heading("Cấu hình biến ngẫu nhiên (Ứng với cài đặt trong file config.py)")
-            print(f"Seed                            : {settings['seed']}")
-            print(f"Use AMP                         : {settings['use_amp']}")
-            print(f"Cudnn benchmark                 : {settings['cudnn_benchmark']}")
-            print(f"Cudnn deterministic             : {settings['cudnn_deterministic']}")
-            print(f"Deterministic algorithms        : {settings['deterministic_algorithms']}\n")
-            
+            _print_run_header(run_directory, resumed_log, model_name, dataset_name, train_df, test_df, folds, settings, signature, launch)
             yield log_path
+
+        # Lỗi hoặc Ctrl+C: ghi traceback vào log rồi ném lỗi tiếp
         except BaseException as exc:
-            # Important: KeyboardInterrupt also enters this branch.
-            print(f'[{_log_timestamp()}] LƯỢT HUẤN LUYỆN BỊ LỖI/TẠM DỪNG: '
-                  f'{type(exc).__name__}: {exc}', file=sys.stderr)
+            print(f"[{timestamp()}] LẦN CHẠY BỊ LỖI / TẠM DỪNG: {type(exc).__name__}: {exc}", file = sys.stderr)
             with mutex:
-                file.write(''.join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+                file.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
                 file.flush()
                 os.fsync(file.fileno())
             raise
         else:
-            print(f'[{_log_timestamp()}] HOÀN THÀNH HUẤN LUYỆN | {run_directory.name}')
+            print(f"[{timestamp()}] KẾT THÚC LẦN CHẠY | {run_directory.name}")
+
+        # Trả lại stdout / stderr trước khi flush, để lỗi I/O không làm output sau đó trỏ vào tệp đã đóng
         finally:
-            # Restore streams *before* flushing so even an I/O error cannot
-            # leave later console output redirected to a closed file.
             sys.stdout, sys.stderr = old_stdout, old_stderr
             stdout_mirror.flush()
             stderr_mirror.flush()
@@ -195,31 +233,108 @@ def capture_run_log(run_directory, *, model_name, dataset_name, train_df, test_d
                 file.flush()
                 os.fsync(file.fileno())
 
-def model_specification(model_factory, classes, device, model_kwargs):
-    model = model_factory(num_classes=len(classes), **model_kwargs).to(device)
-    # Batch size = 1, RGB, 224x224
-    input_tensor = torch.randn(1, 3, config.IMAGE_SIZE, config.IMAGE_SIZE).to(device)
-    
-    # Tính Parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
-    # Tính MAC
-    with torch.no_grad():
-        macs, _ = profile(model, inputs=(input_tensor,), verbose=False)
-        
-    # Tính FLOPS
-    flops = 2 * macs
+
+# ============================================================
+# Đầu log: lượt chạy, dữ liệu, cấu hình (lấy từ settings, tức đúng những gì nằm trong chữ ký) và trạng thái Git
+def _print_run_header(run_directory, resumed_log, model_name, dataset_name, train_df, test_df, folds,
+                      settings, signature, launch):
+    tc = settings["training_config"]
+
+    print("\n" + "=" * config.CONSOLE_WIDTH)
+    print(f"[{timestamp()}] {'TIẾP TỤC' if resumed_log else 'BẮT ĐẦU'} HUẤN LUYỆN | {model_name} | {run_directory.name}")
+    print("=" * config.CONSOLE_WIDTH)
+    print_message("Thư mục lượt chạy", run_directory)
+    print_message("Chữ ký cấu hình", signature[:16])
+    print_message("Git commit", f"{launch['git_commit']} ({launch['git_branch']})")
+    if launch["git_dirty"]:
+        print_message("CẢNH BÁO", f"{len(launch['git_dirty_files'])} tệp chưa commit (danh sách trong train_info.json)")
+    print()
+
+    print_heading("Tập dữ liệu")
+    print_message("Tên", dataset_name)
+    print_message("Số ảnh", f"Huấn luyện / Validation: {len(train_df):,} | Test: {len(test_df):,}")
+    print_message("Số fold / fold chạy lần này", f"{settings['number_of_folds']} / {folds}")
+    print_message("Số lớp", len(settings["classes"]))
+    print_message("Kích cỡ ảnh", f"{settings['image_size']}\n")
+
+    print_heading("Cấu hình huấn luyện")
+    print_message("Hàm Loss", settings["loss_config"])
+    print_message("Optimizer", tc["optimizer"])
+    print_message("Scheduler", tc["scheduler"])
+    print_message("Tiêu chí chọn mô hình", tc["selection_metric"])
+    print_message("Batch size", tc["batch_size"])
+    print_message("Số epoch tối đa", tc["epochs"])
+    print_message("Early stopping", f"patience={tc['early_stop_patience']}, min_delta={tc['min_delta']}")
+    print_message("Gradient", f"accum_steps={tc['grad_accum_steps']}, clip_norm={tc['grad_clip_norm']}")
+    print_message("Mixed precision (AMP)", settings["use_amp"])
+    print_message("Ngưỡng mặc định", settings["threshold"])
+    print_message("Số worker", f"{settings['number_of_workers']}\n")
+
+    print_heading("Làm giàu ảnh")
+    for key, value in settings["augmentation"].items():
+        print_message(key, value)
+    print()
+
+    print_heading("Tái lập")
+    print_message("Seed", settings["seed"])
+    print_message("cuDNN deterministic", settings["cudnn_deterministic"])
+    print_message("cuDNN benchmark", settings["cudnn_benchmark"])
+    print_message("Deterministic algorithms", f"{settings['deterministic_algorithms']}\n")
 
 
-    # Thông báo
-
+# ============================================================
+# Thông số mô hình
+def print_model_specification(specification):
     print_heading("Thông số mô hình")
-    print(f"Parameters                      : {total_params:,}")
-    print(f"Trainable Params                : {trainable_params:,}")
-    print(f"MACs                            : {macs:,.0f}")
-    print(f"FLOPs                           : {flops:,.0f}")
-    
-    del model
-    
+    print_message("Parameters", f"{specification['parameters']:,}")
+    print_message("Trainable parameters", f"{specification['trainable_parameters']:,}")
+    print_message("MACs (1 ảnh)", f"{specification['macs']:,}")
+    print_message("FLOPs (1 ảnh)", f"{specification['flops']:,}")
+    print_message("Độ trễ suy luận (batch 1)", f"{specification['inference_latency_ms_batch_1']:.2f} ms "
+                                               f"({specification['inference_precision']})")
+    print_message(f"Throughput (batch {specification['inference_batch_size']})", f"{specification['inference_images_per_second']:,.0f} ảnh/s")
+# ============================================================
+# Tóm tắt chỉ số Test trên một dòng (chi tiết nằm trong test_summary.json)
+def print_test_summary(title, summary):
+    ci = summary.get("macro_auroc_ci95")
+    ci_text = f" [95% CI {ci[0]:.4f}, {ci[1]:.4f}]" if ci and None not in ci else ""
+    loss = summary.get("test_loss")
+    line = (f"{title} | Macro AUROC {summary['macro_auroc']:.4f}{ci_text} | Macro AP {summary['macro_ap']:.4f} | "
+            f"Macro F1@{summary['threshold']:g} {summary['macro_f1']:.4f}")
+    if loss is not None:
+        line += f" | Loss {loss:.4f}"
+    if "postprocessed" in summary:
+        line += f" | Macro F1 (ngưỡng theo lớp) {summary['postprocessed']['macro_f1']:.4f}"
+    print(line)
+
+
+# ============================================================
+# Tổng kết cuối lượt chạy: Validation từng fold, mean ± std trên Validation và Test, ensemble
+def print_run_summary(cv_frame, test_report = None):
+    def mean_std(values):
+        values = values.dropna()
+        if len(values) == 0:
+            return "không có"
+        std = f" ± {values.std(ddof = 1):.4f}" if len(values) > 1 else ""
+        return f"{values.mean():.4f}{std} ({len(values)} fold)"
+
+    print()
+    print_heading(f"[{timestamp()}] TỔNG KẾT LƯỢT CHẠY")
+    columns = [c for c in ("fold", "best_epoch", "epochs_trained", "stop_reason", "training_minutes",
+                           "train_images_per_second", "peak_gpu_memory_gb", "amp_skipped_steps",
+                           "macro_auroc", "macro_ap") if c in cv_frame]
+    print(cv_frame[columns].round(4).to_string(index = False))
+    print()
+    print_message("Validation macro AUROC", mean_std(cv_frame["macro_auroc"]))
+    print_message("Validation macro AP", mean_std(cv_frame["macro_ap"]))
+    if test_report is not None:
+        auroc = test_report["metric_mean_std"].get("macro_auroc", {})
+        if auroc.get("mean") is not None:
+            std = f" ± {auroc['std']:.4f}" if auroc.get("std") is not None else ""
+            print_message("Test macro AUROC (từng fold)", f"{auroc['mean']:.4f}{std} ({auroc['number_of_folds']} fold)")
+        ensemble = test_report.get("ensemble")
+        if ensemble is not None:
+            ci = ensemble.get("macro_auroc_ci95")
+            ci_text = f" [95% CI {ci[0]:.4f}, {ci[1]:.4f}]" if ci and None not in ci else ""
+            print_message("Test macro AUROC (ensemble)", f"{ensemble['macro_auroc']:.4f}{ci_text}")
+    print()
