@@ -21,22 +21,20 @@ from utilities.dataset import NIHChestXrayDataset
 # ============================================================
 # MODEL SETTINGS
 MODEL_NAME = "DenseNet121 Baseline_v1"
-DROPOUT = 0.2
 dataset_class = NIHChestXrayDataset
 
 # ============================================================
-# Mô hình: DenseNet121 thuần (GAP + Linear)
+# Mô hình: DenseNet-121
 class DenseNetBaseline(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
         self.cnn = densenet121(weights = DenseNet121_Weights.IMAGENET1K_V1).features
-        self.dropout = nn.Dropout(DROPOUT)
         self.classifier = nn.Linear(1024, num_classes)
 
     def forward(self, x):
         x = F.relu(self.cnn(x))                                # [B, 1024, H/32, W/32]
         x = F.adaptive_avg_pool2d(x, 1).flatten(1)             # [B, 1024]
-        return self.classifier(self.dropout(x))
+        return self.classifier(x)
 
 if __name__ == "__main__":
     run_experiment(
