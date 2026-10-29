@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tqdm import tqdm
+from tqdm.utils import disp_trim
 
 import config
 
@@ -39,11 +40,18 @@ def print_message(TITLE, MESSAGE):
 class TqdmComma(tqdm):
     @staticmethod
     def format_meter(n, total, elapsed, **kwargs):
+        # tqdm cắt dòng vừa đúng độ rộng terminal; dấu phẩy chèn sau đó làm dòng dài hơn --> terminal tự xuống dòng,
+        # mỗi lần vẽ lại nhảy một dòng. Vì vậy chừa sẵn chỗ cho dấu phẩy (và 1 cột cho terminal Windows) trước khi tqdm tính độ rộng
+        ncols = kwargs.get("ncols")
+        plain, grouped = (f"{int(n)}/{int(total)}", f"{int(n):,}/{int(total):,}") if total is not None else ("", "")
+        if ncols:
+            kwargs["ncols"] = max(ncols - (len(grouped) - len(plain)) - 1, 10)
         text = tqdm.format_meter(n = n, total = total, elapsed = elapsed, **kwargs)
         if total is not None:
-            text = text.replace(f"{int(n)}/{int(total)}", f"{int(n):,}/{int(total):,}")
+            text = text.replace(plain, grouped, 1)
         # Đơn vị " batch" có khoảng trắng để hiện "8.32 batch/s"; khi chậm hơn 1 batch/s tqdm đảo thành "2.39 s/batch"
-        return text.replace("s/ batch", " s/batch")
+        text = text.replace("s/ batch", " s/batch")
+        return disp_trim(text, ncols - 1) if ncols else text
 
 
 # ============================================================
@@ -127,6 +135,10 @@ class GPUMonitor:
 # KHÔNG dùng tqdm.auto: lớp tqdm_asyncio gọi iter(loader) ngay khi khởi tạo, tạo thêm một iterator DataLoader
 # thừa mỗi epoch (thêm một bộ worker nạp ảnh rồi bỏ, chậm gần gấp đôi lúc đầu epoch, và lệch seed của loader).
 def progress_bar(iterable, description, device):
+    # Xuống một dòng trước khi vẽ thanh, in đúng một lần (đặt "\n" trong nhãn sẽ làm mỗi lần vẽ lại nhảy thêm một dòng).
+    # Ghi "\r\n" ra stderr như tqdm: chỉ hiện trên màn hình, run.log bỏ qua mọi đoạn có "\r" nên không có dòng trống
+    sys.stdout.flush()
+    sys.stderr.write("\r\n")
     bar = TqdmComma(iterable, desc = description, unit = " batch", leave = False, dynamic_ncols = True)
     bar.gpu_monitor = GPUMonitor.get() if device.type == "cuda" else None
     return bar

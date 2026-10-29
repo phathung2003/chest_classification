@@ -103,7 +103,7 @@ def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler, 
 
     # Thời gian chờ dữ liệu = khoảng từ lúc xử lý xong batch trước tới lúc nhận batch sau (gồm cả khởi động worker)
     epoch_started = batch_finished = time.perf_counter()
-    progress = progress_bar(loader, f"\nEpoch {epoch:02d} [Huấn luyện]", device)
+    progress = progress_bar(loader, f"Epoch {epoch:02d} [Huấn luyện]", device)
     for step, (images, targets) in enumerate(progress, start = 1):
         data_wait_seconds += time.perf_counter() - batch_finished
         images = images.to(device, non_blocking = True)

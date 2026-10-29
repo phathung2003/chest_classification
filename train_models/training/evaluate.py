@@ -20,7 +20,7 @@ def evaluate(device, number_of_classes, model, loader, criterion = None, epoch =
     running_loss = 0.0
     target_batches, probability_batches = [], []
 
-    description = f"\nEpoch {epoch:02d} [Kiểm thử]" if epoch is not None else "Kiểm tra"
+    description = f"Epoch {epoch:02d} [Kiểm thử]" if epoch is not None else "Kiểm tra"
     progress = progress_bar(loader, description, device)
     seen = 0
     for images, targets in progress:
