@@ -22,8 +22,8 @@ IMAGE_EXTENSION             = {".png", ".jpg", ".jpeg"}                         
 # ============================================================
 # DataLoader
 BATCH_SIZE                  = 32                                                                        # Số ảnh mỗi batch
-NUMBER_OF_WORKERS           = 10                                                                        # Số tiến trình tải dữ liệu song song
-PREFETCH_FACTOR             = 6                                                                         # Số batch mỗi worker tải trước
+NUMBER_OF_WORKERS           = 4                                                                        # Số tiến trình tải dữ liệu song song
+PREFETCH_FACTOR             = 8                                                                         # Số batch mỗi worker tải trước
 PERSISTENT_WORKERS          = True                                                                      # Giữ worker giữa các epoch (chỉ loader Validation/Test)
 
 # ============================================================
@@ -34,9 +34,10 @@ WEIGHT_DECAY                = 0.0005                                            
 GRAD_ACCUM_STEPS            = 1                                                                         # Số batch cộng dồn gradient trước mỗi lần cập nhật
 GRAD_CLIP_NORM              = None                                                                      # Ngưỡng clip gradient (ví dụ 1.0); None = không clip
 USE_AMP                     = True                                                                      # Huấn luyện mixed precision FP16 trên GPU
-PATIENCE                    = 8                                                                         # Early stopping: số epoch không cải thiện tối đa
+EMA_DECAY                   = 0.9995                                                                    # EMA trọng số: hệ số tối đa (khởi động (1 + n) / (10 + n)); Validation, chọn và lưu mô hình bằng trọng số EMA; None = tắt
+PATIENCE                    = 5                                                                         # Early stopping: số epoch không cải thiện tối đa
 MIN_DELTA                   = 0                                                                         # Early stopping: mức cải thiện tối thiểu
-SCHEDULER_PATIENCE          = 3                                                                         # ReduceLROnPlateau: số epoch chờ trước khi giảm LR
+SCHEDULER_PATIENCE          = 2                                                                         # ReduceLROnPlateau: số epoch chờ trước khi giảm LR
 SCHEDULER_FACTOR            = 0.5                                                                       # ReduceLROnPlateau: hệ số giảm LR
 OPTIMIZER_NAME              = "adamw"                                                                   # Optimizer mặc định: adam | adamw | sgd
 ADAM_BETAS                  = (0.9, 0.999)                                                              # Adam / AdamW: hệ số trung bình động của gradient và bình phương gradient
@@ -80,7 +81,7 @@ INFERENCE_TIMED_STEPS       = 30                                                
 SELECTION_METRIC            = "macro_auroc"                                                             # Tiêu chí chọn mô hình tốt nhất: macro_auroc | validation_loss
 # ============================================================
 # Hậu xử lý: chọn ngưỡng theo lớp trên dự đoán OOF (không bao giờ dùng tập Test)
-ENABLE_POSTPROCESS          = False                                                                     # Bật chọn ngưỡng theo lớp
+ENABLE_POSTPROCESS          = True                                                                    # Bật chọn ngưỡng theo lớp
 POSTPROCESS_CALIBRATION     = "none"                                                                    # none | temperature
 THRESHOLD_BETA              = 1.0                                                                       # Tối ưu F-beta (1.0 = F1, 2.0 = F2)
 THRESHOLD_MIN_RECALL        = 0.0                                                                       # Ràng buộc recall tối thiểu khi chọn ngưỡng

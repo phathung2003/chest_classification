@@ -23,6 +23,7 @@ def build_training_config(optimizer_config = None, scheduler_config = None, sele
         "min_delta"             : float(config.MIN_DELTA),
         "grad_accum_steps"      : int(config.GRAD_ACCUM_STEPS),
         "grad_clip_norm"        : None if config.GRAD_CLIP_NORM is None else float(config.GRAD_CLIP_NORM),
+        "ema_decay"             : None if config.EMA_DECAY is None else float(config.EMA_DECAY),
         "selection_metric"      : selection_metric,
         "optimizer"             : _complete_optimizer_config(optimizer_config),
         "scheduler"             : _complete_scheduler_config(scheduler_config, selection_metric),
@@ -38,6 +39,9 @@ def build_training_config(optimizer_config = None, scheduler_config = None, sele
     clip = training_config["grad_clip_norm"]
     if clip is not None and (not math.isfinite(clip) or clip <= 0):
         raise ValueError("GRAD_CLIP_NORM phải là số dương hoặc None")
+    ema_decay = training_config["ema_decay"]
+    if ema_decay is not None and not 0 < ema_decay < 1:
+        raise ValueError("EMA_DECAY phải nằm trong khoảng (0, 1) hoặc None")
 
     return training_config
 

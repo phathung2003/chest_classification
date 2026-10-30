@@ -45,7 +45,7 @@ def check_checkpoint(saved, *, signature, fold, status):
 
 # ============================================================
 # Lưu checkpoint
-def save_training_state(path, *, fold, epoch, model, criterion, optimizer, scheduler, scaler, history, best_score, best_epoch, no_improvement, signature, training_finished, selection_metric):
+def save_training_state(path, *, fold, epoch, model, criterion, optimizer, scheduler, scaler, history, best_score, best_epoch, no_improvement, signature, training_finished, selection_metric, ema = None):
     save_torch(path, {
         "status"                : "fold",
         "fold"                  : int(fold),
@@ -56,6 +56,7 @@ def save_training_state(path, *, fold, epoch, model, criterion, optimizer, sched
         "optimizer_state_dict"  : optimizer.state_dict(),
         "scheduler_state_dict"  : scheduler.state_dict() if scheduler is not None else None,
         "scaler_state_dict"     : scaler.state_dict(),
+        "ema_state_dict"        : ema.state_dict() if ema is not None else None,
         "history"               : history,
         "selection_metric"      : str(selection_metric),
         "best_score"            : float(best_score),        # Điểm tốt nhất theo selection_metric
@@ -67,7 +68,7 @@ def save_training_state(path, *, fold, epoch, model, criterion, optimizer, sched
 
 # ============================================================
 # Tải lại mô hình
-def resume_training(path, *, model, criterion, optimizer, scheduler, scaler, device, signature, fold):
+def resume_training(path, *, model, criterion, optimizer, scheduler, scaler, device, signature, fold, ema = None):
     saved = load_torch(path, device)
     check_checkpoint(saved, signature = signature, fold = fold, status = "fold")
 
@@ -77,9 +78,13 @@ def resume_training(path, *, model, criterion, optimizer, scheduler, scaler, dev
 
     if (scheduler is None) != (saved["scheduler_state_dict"] is None):
         raise ValueError("Cấu hình scheduler không khớp checkpoint")
+    if (ema is None) != (saved.get("ema_state_dict") is None):
+        raise ValueError("Cấu hình EMA không khớp checkpoint")
 
     if scheduler is not None:
         scheduler.load_state_dict(saved["scheduler_state_dict"])
+    if ema is not None:
+        ema.load_state_dict(saved["ema_state_dict"])
     scaler.load_state_dict(saved["scaler_state_dict"])
     restore_rng(saved["rng_state"])
 
@@ -123,8 +128,11 @@ def reconcile_best(last, best_path, *, signature, fold, classes, model_name, mod
     if best_epoch != int(last["epoch"]):
         raise ValueError("Không thể khôi phục trọng số tốt nhất từ checkpoint cuối")
 
+    # Có EMA thì mô hình được đánh giá (và cần lưu) là trọng số EMA
     validation_auroc = next((row["macro_auroc"] for row in last["history"] if int(row["epoch"]) == best_epoch), last["best_score"])
-    save_best_model(best_path, model_state_dict = last["model_state_dict"], fold = fold, epoch = best_epoch, score = last["best_score"], validation_macro_auroc = validation_auroc, selection_metric = last["selection_metric"], signature = signature, classes = classes, model_name = model_name, model_kwargs = model_kwargs)
+    ema_state = last.get("ema_state_dict")
+    model_state_dict = ema_state["module_state_dict"] if ema_state is not None else last["model_state_dict"]
+    save_best_model(best_path, model_state_dict = model_state_dict, fold = fold, epoch = best_epoch, score = last["best_score"], validation_macro_auroc = validation_auroc, selection_metric = last["selection_metric"], signature = signature, classes = classes, model_name = model_name, model_kwargs = model_kwargs)
 
 # ============================================================
 # Chọn lượt chạy

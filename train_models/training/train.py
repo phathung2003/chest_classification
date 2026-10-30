@@ -9,6 +9,7 @@ from sklearn.metrics import roc_auc_score
 
 import config
 from training.checkpoint import check_checkpoint, reconcile_best, resume_training, save_best_model, save_training_state
+from training.ema import ModelEMA
 from training.evaluate import evaluate
 from training.loss import build_loss
 from training.optimizer import make_optimizer, make_scheduler
@@ -100,7 +101,7 @@ def _total_grad_norm(optimizer):
 
 # ============================================================
 # Huấn luyện một epoch
-def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler, training_config):
+def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler, training_config, ema = None):
     grad_accum_steps = int(training_config["grad_accum_steps"])
     grad_clip_norm = training_config["grad_clip_norm"]
 
@@ -152,6 +153,8 @@ def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler, 
                 amp_skipped_steps += 1
             else:
                 grad_norms.append(float(grad_norm))
+                if ema is not None:
+                    ema.update(model)
             optimizer.zero_grad(set_to_none = True)
             accumulated_samples = 0
 
@@ -217,6 +220,9 @@ def train_one_fold(ctx, fold, train_folds_df):
     set_seed(int(config.SEED) + fold)
     model, criterion, loss_metadata = build_model_and_loss(ctx, train_df)
     optimizer, scheduler, scaler = build_optimization(ctx, model, criterion)
+    # EMA: Validation, early stopping, scheduler và best_model.pt đều dùng trọng số EMA
+    ema = ModelEMA(model, tc["ema_decay"]) if tc["ema_decay"] is not None else None
+    evaluated_model = model if ema is None else ema.module
     if "pos_weight" in loss_metadata:
         print(f"pos_weight của fold: {[round(w, 3) for w in loss_metadata['pos_weight']]}")
 
@@ -227,7 +233,7 @@ def train_one_fold(ctx, fold, train_folds_df):
 
     # Chạy tiếp từ checkpoint cuối
     if last_path.exists():
-        saved = resume_training(last_path, model = model, criterion = criterion, optimizer = optimizer, scheduler = scheduler, scaler = scaler, device = ctx.device, signature = ctx.signature, fold = fold)
+        saved = resume_training(last_path, model = model, criterion = criterion, optimizer = optimizer, scheduler = scheduler, scaler = scaler, device = ctx.device, signature = ctx.signature, fold = fold, ema = ema)
         epoch_start, history = int(saved["epoch"]) + 1, saved["history"]
         best_score, best_epoch = float(saved["best_score"]), int(saved["best_epoch"])
         no_improvement, finished = int(saved["no_improvement"]), bool(saved["training_finished"])
@@ -249,12 +255,12 @@ def train_one_fold(ctx, fold, train_folds_df):
 
         # Huấn luyện (train loader tạo lại mỗi epoch với seed theo fold và epoch)
         _, train_loader = create_dataloader(ctx.dataset_class, ctx.classes, ctx.device, train_df, ctx.train_transform, True, batch_size = ctx.batch_size, seed = train_loader_seed(fold, epoch), persistent_workers = False)
-        train_stats = train_one_epoch(epoch, ctx.device, model, train_loader, criterion, optimizer, scaler, tc)
+        train_stats = train_one_epoch(epoch, ctx.device, model, train_loader, criterion, optimizer, scaler, tc, ema = ema)
         del train_loader
 
         # Đánh giá Validation
         validation_started = time.perf_counter()
-        validation_loss, metrics, _, _ = evaluate(ctx.device, ctx.number_of_classes, model, validation_loader, criterion, epoch = epoch)
+        validation_loss, metrics, _, _ = evaluate(ctx.device, ctx.number_of_classes, evaluated_model, validation_loader, criterion, epoch = epoch)
         validation_seconds = time.perf_counter() - validation_started
         auc = float(metrics["macro_auroc"])
         score = auc if higher_is_better else float(validation_loss)
@@ -293,9 +299,9 @@ def train_one_fold(ctx, fold, train_folds_df):
         })
 
         # Lưu checkpoint cuối trước, rồi mới lưu mô hình tốt nhất (reconcile_best xử lý trường hợp dừng giữa hai bước)
-        save_training_state(last_path, fold = fold, epoch = epoch, model = model, criterion = criterion, optimizer = optimizer, scheduler = scheduler, scaler = scaler, history = history, best_score = best_score, best_epoch = best_epoch, no_improvement = no_improvement, signature = ctx.signature, training_finished = finished, selection_metric = selection_metric)
+        save_training_state(last_path, fold = fold, epoch = epoch, model = model, criterion = criterion, optimizer = optimizer, scheduler = scheduler, scaler = scaler, history = history, best_score = best_score, best_epoch = best_epoch, no_improvement = no_improvement, signature = ctx.signature, training_finished = finished, selection_metric = selection_metric, ema = ema)
         if improved:
-            save_best_model(best_path, model_state_dict = model.state_dict(), fold = fold, epoch = epoch, score = score, validation_macro_auroc = auc, selection_metric = selection_metric, signature = ctx.signature, classes = ctx.classes, model_name = ctx.model_name, model_kwargs = ctx.model_kwargs)
+            save_best_model(best_path, model_state_dict = evaluated_model.state_dict(), fold = fold, epoch = epoch, score = score, validation_macro_auroc = auc, selection_metric = selection_metric, signature = ctx.signature, classes = ctx.classes, model_name = ctx.model_name, model_kwargs = ctx.model_kwargs)
         save_history(fold_directory, history, ctx.classes)
 
         # Một dòng mỗi epoch (accuracy theo nhãn, chuẩn gradient và các chỉ số khác nằm trong history.csv)
@@ -318,7 +324,7 @@ def train_one_fold(ctx, fold, train_folds_df):
 
     # 4. Kết thúc fold
     result = finalize_fold(ctx, fold, model, criterion, validation_df, best_path, history)
-    del optimizer, scheduler, scaler
+    del optimizer, scheduler, scaler, ema, evaluated_model
     cleanup()
     return model, criterion, result
 
