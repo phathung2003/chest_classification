@@ -8,7 +8,7 @@ from training.threshold import fit_fold_thresholds, fit_postprocessing
 from training.train import cleanup, train_one_fold
 from utilities.data import load_dataset, transform_setting
 from utilities.file import read_json, save_json, to_snake_case
-from utilities.log import capture_run_log, print_model_specification, print_run_summary
+from utilities.log import GPUMonitor, capture_run_log, print_model_specification, print_run_summary
 from utilities.setting import device_info, set_fold, set_seed
 from utilities.tracking import launch_record, make_signature, model_specification
 
@@ -41,6 +41,9 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs = None
 
         # Thiết bị, thông số mô hình, biến đổi ảnh
         device = device_info()
+        gpu_monitor = GPUMonitor.get() if device.type == "cuda" else None
+        if gpu_monitor is not None:
+            gpu_monitor.reset_statistics()
         specification = model_specification(model_factory, classes, device, model_kwargs, training_config["batch_size"])
         print_model_specification(specification)
         update_train_info(output_directory, model_specification = specification)
@@ -49,7 +52,11 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs = None
         set_seed()
 
         # 5. Từng fold
-        results = [run_fold(ctx, fold, train_df, test_df) for fold in folds]
+        # Thống kê GPU của lần khởi chạy này được ghi lại sau mỗi fold (lượt chạy bị ngắt vẫn giữ số liệu các fold đã xong)
+        results = []
+        for fold in folds:
+            results.append(run_fold(ctx, fold, train_df, test_df))
+            record_gpu_statistics(output_directory, gpu_monitor)
 
         # 6. Tổng hợp Cross-Validation
         frame, all_done = cross_validation(output_directory, results, number_of_folds, signature)
@@ -70,6 +77,7 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs = None
         update_train_info(output_directory, folds_completed = frame["fold"].astype(int).tolist(), fold_tests_completed = fold_tests,
             train_completed = bool(all_done and (not config.EVALUATE_FOLD_MODELS_ON_TEST
                                                or len(fold_tests) == number_of_folds)))
+        record_gpu_statistics(output_directory, gpu_monitor)
         print_run_summary(frame, test_report)
         return frame
 
@@ -105,4 +113,15 @@ def update_train_info(output_directory, append_launch = None, **values):
     if append_launch is not None:
         info.setdefault("launches", []).append(append_launch)
     info.update(values)
+    save_json(path, info)
+
+
+# ============================================================
+# Ghi thống kê GPU (xung, nhiệt độ, công suất, thời gian giảm xung) vào lần khởi chạy cuối trong train_info.json
+def record_gpu_statistics(output_directory, gpu_monitor):
+    if gpu_monitor is None:
+        return
+    path = output_directory / "train_info.json"
+    info = read_json(path)
+    info["launches"][-1]["gpu_statistics"] = gpu_monitor.statistics()
     save_json(path, info)

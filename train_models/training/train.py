@@ -15,7 +15,7 @@ from training.loss import build_loss
 from training.optimizer import make_optimizer, make_scheduler
 from utilities.data import create_dataloader
 from utilities.file import load_torch, read_json, save_csv, save_json
-from utilities.log import progress_bar, timestamp, update_progress
+from utilities.log import GPUMonitor, progress_bar, update_progress
 from utilities.metric import class_metrics_dataframe, with_probabilities
 from utilities.setting import set_seed
 
@@ -74,7 +74,10 @@ def save_history(fold_directory, history, classes):
     frame = pd.DataFrame(history)
     class_columns = [f"auroc_{name}" for name in classes if f"auroc_{name}" in frame]
     epoch_frame = frame.drop(columns = class_columns)
-    ordered = [c for c in HISTORY_COLUMNS if c in epoch_frame] + [c for c in epoch_frame if c not in HISTORY_COLUMNS]
+    # Thống kê GPU của epoch (gpu_*) đứng cuối cùng
+    gpu_columns = [c for c in epoch_frame if c.startswith("gpu_")]
+    ordered = ([c for c in HISTORY_COLUMNS if c in epoch_frame]
+               + [c for c in epoch_frame if c not in HISTORY_COLUMNS and c not in gpu_columns] + gpu_columns)
     save_csv(fold_directory / "history.csv", epoch_frame[ordered])
     if class_columns:
         class_frame = frame[["epoch", *class_columns]].rename(columns = lambda c: c.removeprefix("auroc_"))
@@ -246,12 +249,15 @@ def train_one_fold(ctx, fold, train_folds_df):
     _, validation_loader = create_dataloader(ctx.dataset_class, ctx.classes, ctx.device, validation_df, ctx.eval_transform, False, batch_size = ctx.batch_size, seed = int(config.SEED))
 
     # 3. Vòng lặp epoch
+    gpu_monitor = GPUMonitor.get() if ctx.device.type == "cuda" else None
     for epoch in range(epoch_start, tc["epochs"] + 1):
         if finished:
             break
         started = time.perf_counter()
         if ctx.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(ctx.device)
+        if gpu_monitor is not None:
+            gpu_monitor.reset_statistics("epoch")
 
         # Huấn luyện (train loader tạo lại mỗi epoch với seed theo fold và epoch)
         _, train_loader = create_dataloader(ctx.dataset_class, ctx.classes, ctx.device, train_df, ctx.train_transform, True, batch_size = ctx.batch_size, seed = train_loader_seed(fold, epoch), persistent_workers = False)
@@ -282,7 +288,7 @@ def train_one_fold(ctx, fold, train_folds_df):
         next_learning_rate = optimizer.param_groups[0]["lr"]
 
         # Lịch sử epoch (learning_rate: giá trị cho epoch kế tiếp, giữ như các lượt chạy trước).
-        # AUROC Validation từng lớp lưu với tiền tố "auroc_", được tách ra history_class_auroc.csv
+        # AUROC Validation từng lớp lưu với tiền tố "auroc_", được tách ra history_class_auroc.csv; thống kê GPU của epoch (Train + Validation) lưu với tiền tố "gpu_"
         history.append({
             "fold"                  : fold,
             "epoch"                 : epoch,
@@ -296,6 +302,7 @@ def train_one_fold(ctx, fold, train_folds_df):
             "peak_gpu_memory_gb"    : (torch.cuda.max_memory_allocated(ctx.device) / 1024 ** 3
                                        if ctx.device.type == "cuda" else None),
             **{f"auroc_{name}": value for name, value in zip(ctx.classes, metrics["class_aurocs"])},
+            **(gpu_monitor.epoch_columns() if gpu_monitor is not None else {}),
         })
 
         # Lưu checkpoint cuối trước, rồi mới lưu mô hình tốt nhất (reconcile_best xử lý trường hợp dừng giữa hai bước)
@@ -306,12 +313,12 @@ def train_one_fold(ctx, fold, train_folds_df):
 
         # Một dòng mỗi epoch (accuracy theo nhãn, chuẩn gradient và các chỉ số khác nằm trong history.csv)
         data_share = train_stats["data_wait_seconds"] / max(train_stats["train_seconds"], 1e-9)
-        print(f"Epoch: {epoch:02d} | Train: [Loss: {train_stats['train_loss']:.4f}, Macro AUROC: {train_stats['train_auroc']:.4f}] | "
+        print(f"Epoch: {epoch:02d} | Huấn luyện: [Loss: {train_stats['train_loss']:.4f}, Macro AUROC: {train_stats['train_auroc']:.4f}] | "
               f"Validation: [Loss: {validation_loss:.4f}, Macro AUROC: {auc:.4f}, AP: {metrics['macro_ap']:.4f}] | "
-              f"Learning rate: {learning_rate:.1e} | Time: {time.perf_counter() - started:.0f}s ({train_stats['train_images_per_second']:.0f} ảnh/s, chờ dữ liệu {data_share:.0%}) | "
+              f"\nTốc độ học: {learning_rate:.1e} | Tổng thời gian: {time.perf_counter() - started:.0f}s ({train_stats['train_images_per_second']:.0f} ảnh/s, chờ dữ liệu {data_share:.0%}) | "
               + ("[Mô hình tốt nhất]" if improved
                  else f"Không cải thiện {no_improvement}/{tc['early_stop_patience']} "
-                      f"(Tốt nhất {selection_metric}: {best_score:.4f} ở epoch {best_epoch})"))
+                      f"(Tốt nhất: {selection_metric}: {best_score:.4f} ở epoch {best_epoch})"))
         
         if next_learning_rate < learning_rate and finished != True:
             print(f"Scheduler giảm learning rate: {learning_rate:.1e} -> {next_learning_rate:.1e}")

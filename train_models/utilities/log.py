@@ -56,7 +56,12 @@ class GPUMonitor:
     def __init__(self, device_index = 0, interval = None):
         self.device_index = device_index
         self.interval = config.GPU_MONITOR_INTERVAL if interval is None else interval
-        self.snapshot = {"utilization": None, "memory_used_mb": None, "memory_total_mb": None, "power_w": None, "temperature_c": None}
+        self.snapshot = {"utilization": None, "memory_used_mb": None, "memory_total_mb": None, "power_w": None, "temperature_c": None,
+                         "sm_clock_mhz": None, "slowdown_us": None}
+        self._lock = threading.Lock()
+        self._scopes = {}
+        for scope in self._SCOPES:
+            self.reset_statistics(scope)
         self._reader = self._make_reader()
         threading.Thread(target = self._loop, daemon = True, name = "gpu-monitor").start()
 
@@ -87,7 +92,11 @@ class GPUMonitor:
                 return {"utilization"   : pynvml.nvmlDeviceGetUtilizationRates(handle).gpu,
                         "memory_used_mb": memory.used / 1024 ** 2, "memory_total_mb": memory.total / 1024 ** 2,
                         "power_w"       : None if power_mw is None else power_mw / 1000,
-                        "temperature_c" : optional(lambda: pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))}
+                        "temperature_c" : optional(lambda: pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)),
+                        "sm_clock_mhz"  : optional(lambda: pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM)),
+                        "slowdown_us"   : {name: optional(lambda: pynvml.nvmlDeviceGetViolationStatus(handle, policy).violationTime / 1000)
+                                           for name, policy in (("power_cap", pynvml.NVML_PERF_POLICY_POWER),
+                                                                ("thermal", pynvml.NVML_PERF_POLICY_THERMAL))}}
             read_nvml()
             return read_nvml
         except Exception:
@@ -95,7 +104,9 @@ class GPUMonitor:
 
         def read_nvidia_smi():
             output = subprocess.run(
-                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
+                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu,clocks.sm,"
+                 "clocks_event_reasons_counters.sw_power_cap,clocks_event_reasons_counters.sw_thermal_slowdown,"
+                 "clocks_event_reasons_counters.hw_thermal_slowdown,clocks_event_reasons_counters.hw_power_brake_slowdown",
                  "--format=csv,noheader,nounits", "-i", str(self.device_index)],
                 capture_output = True, text = True, timeout = 5,
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
@@ -106,9 +117,11 @@ class GPUMonitor:
                     values.append(float(v))
                 except ValueError:
                     values.append(None)
-            utilization, used, total, power, temperature = values
+            utilization, used, total, power, temperature, clock, power_cap, sw_thermal, hw_thermal, power_brake = values
+            thermal = None if sw_thermal is None or hw_thermal is None else sw_thermal + hw_thermal
             return {"utilization": utilization, "memory_used_mb": used, "memory_total_mb": total,
-                    "power_w": power, "temperature_c": temperature}
+                    "power_w": power, "temperature_c": temperature, "sm_clock_mhz": clock,
+                    "slowdown_us": {"power_cap": power_cap, "thermal": thermal, "power_brake": power_brake}}
 
         try:
             read_nvidia_smi()
@@ -120,16 +133,72 @@ class GPUMonitor:
             import torch
             free, total = torch.cuda.mem_get_info(self.device_index)
             return {"utilization": None, "memory_used_mb": (total - free) / 1024 ** 2, "memory_total_mb": total / 1024 ** 2,
-                    "power_w": None, "temperature_c": None}
+                    "power_w": None, "temperature_c": None, "sm_clock_mhz": None, "slowdown_us": None}
         return read_torch
 
     def _loop(self):
         while True:
             try:
-                self.snapshot = self._reader()
+                snapshot = self._reader()
+                self.snapshot = snapshot
+                self._accumulate(snapshot)
             except Exception:
                 pass
             time.sleep(self.interval)
+
+    # ------------------------------------------------------------
+    # Thống kê theo thời gian, tính riêng cho từng phạm vi ("run": train_info.json, "epoch": history.csv):
+    #   - utilization / power / temperature / xung SM: trung bình và cao nhất (xung lấy thêm thấp nhất) trên mọi mẫu đọc
+    #   - Thời gian giảm xung: hiệu bộ đếm tích lũy của driver giữa mẫu đầu và mẫu cuối kể từ lần reset
+    _STATISTIC_KEYS = ("utilization", "power_w", "temperature_c", "sm_clock_mhz")
+    _SCOPES = ("run", "epoch")
+
+    def reset_statistics(self, scope = "run"):
+        with self._lock:
+            self._scopes[scope] = {"started": time.time(), "samples": 0, "values": {key: [] for key in self._STATISTIC_KEYS},
+                                   "slowdown_first": None, "slowdown_last": None}
+
+    def _accumulate(self, snapshot):
+        with self._lock:
+            for state in self._scopes.values():
+                state["samples"] += 1
+                for key in self._STATISTIC_KEYS:
+                    if snapshot.get(key) is not None:
+                        state["values"][key].append(float(snapshot[key]))
+                if snapshot.get("slowdown_us") is not None:
+                    if state["slowdown_first"] is None:
+                        state["slowdown_first"] = snapshot["slowdown_us"]
+                    state["slowdown_last"] = snapshot["slowdown_us"]
+
+    def statistics(self, scope = "run"):
+        with self._lock:
+            state = self._scopes[scope]
+            result = {"monitored_seconds": round(time.time() - state["started"], 1), "samples": state["samples"],
+                      "interval_seconds": self.interval}
+            for key, values in state["values"].items():
+                result[key] = {"mean": round(sum(values) / len(values), 2), "max": round(max(values), 2)} if values else None
+            if result["sm_clock_mhz"] is not None:
+                result["sm_clock_mhz"]["min"] = round(min(state["values"]["sm_clock_mhz"]), 2)
+
+            slowdown = None
+            if state["slowdown_first"] is not None:
+                slowdown = {}
+                for reason, last in state["slowdown_last"].items():
+                    first = state["slowdown_first"].get(reason)
+                    slowdown[reason] = None if first is None or last is None else round(max(last - first, 0) / 1e6, 3)
+            result["clock_slowdown_seconds"] = slowdown
+            return result
+
+    # Thống kê phạm vi epoch dạng phẳng cho history.csv: gpu_<chỉ số>_<mean|max|min>, gpu_slowdown_<lý do>_seconds
+    def epoch_columns(self):
+        statistics = self.statistics("epoch")
+        columns = {}
+        for key in self._STATISTIC_KEYS:
+            for name in ("mean", "max", "min") if key == "sm_clock_mhz" else ("mean", "max"):
+                columns[f"gpu_{key}_{name}"] = None if statistics[key] is None else statistics[key][name]
+        for reason in ("power_cap", "thermal", "power_brake"):
+            columns[f"gpu_slowdown_{reason}_seconds"] = (statistics["clock_slowdown_seconds"] or {}).get(reason)
+        return columns
 
     # Chuỗi hiển thị: "GPU 97% | VRAM 5.00/8.00 GB | 85 W | 74°C"
     def text(self):
@@ -264,7 +333,7 @@ def _print_run_header(run_directory, resumed_log, model_name, dataset_name, trai
     print(f"[{timestamp()}] {'TIẾP TỤC' if resumed_log else 'BẮT ĐẦU'} HUẤN LUYỆN | Lần chạy thứ: {run_directory.name.removeprefix('run_')}")
     print_message("Model", model_name)
     print_message("Tên tập dữ liệu", dataset_name)
-    print_message("Số ảnh", f"Huấn luyện / Validation: {len(train_df):,} | Test: {len(test_df):,}\n")
+    print_message("Số ảnh", f"Huấn luyện/Kiểm thử: {len(train_df):,} | Kiểm tra: {len(test_df):,}\n")
     
     # Thông tin tập dữ liệu
     print_heading("Cấu hình tập dữ liệu (Ứng với cài đặt trong file config.py)")
