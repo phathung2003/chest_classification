@@ -56,7 +56,7 @@ class GPUMonitor:
     def __init__(self, device_index = 0, interval = None):
         self.device_index = device_index
         self.interval = config.GPU_MONITOR_INTERVAL if interval is None else interval
-        self.snapshot = {"utilization": None, "memory_used_mb": None, "memory_total_mb": None}
+        self.snapshot = {"utilization": None, "memory_used_mb": None, "memory_total_mb": None, "power_w": None, "temperature_c": None}
         self._reader = self._make_reader()
         threading.Thread(target = self._loop, daemon = True, name = "gpu-monitor").start()
 
@@ -74,22 +74,41 @@ class GPUMonitor:
             pynvml.nvmlInit()
             handle = pynvml.nvmlDeviceGetHandleByIndex(self.device_index)
 
+            # Điện năng / nhiệt độ có thể không hỗ trợ trên một số GPU --> None
+            def optional(read):
+                try:
+                    return read()
+                except pynvml.NVMLError:
+                    return None
+
             def read_nvml():
                 memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                return (pynvml.nvmlDeviceGetUtilizationRates(handle).gpu,
-                        memory.used / 1024 ** 2, memory.total / 1024 ** 2)
+                power_mw = optional(lambda: pynvml.nvmlDeviceGetPowerUsage(handle))
+                return {"utilization"   : pynvml.nvmlDeviceGetUtilizationRates(handle).gpu,
+                        "memory_used_mb": memory.used / 1024 ** 2, "memory_total_mb": memory.total / 1024 ** 2,
+                        "power_w"       : None if power_mw is None else power_mw / 1000,
+                        "temperature_c" : optional(lambda: pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU))}
+            read_nvml()
             return read_nvml
         except Exception:
             pass
 
         def read_nvidia_smi():
             output = subprocess.run(
-                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total",
+                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total,power.draw,temperature.gpu",
                  "--format=csv,noheader,nounits", "-i", str(self.device_index)],
                 capture_output = True, text = True, timeout = 5,
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
-            utilization, used, total = (float(v) for v in output.strip().split(","))
-            return utilization, used, total
+            # Trường không hỗ trợ trả về "[N/A]" --> None
+            values = []
+            for v in output.strip().split(","):
+                try:
+                    values.append(float(v))
+                except ValueError:
+                    values.append(None)
+            utilization, used, total, power, temperature = values
+            return {"utilization": utilization, "memory_used_mb": used, "memory_total_mb": total,
+                    "power_w": power, "temperature_c": temperature}
 
         try:
             read_nvidia_smi()
@@ -100,19 +119,19 @@ class GPUMonitor:
         def read_torch():
             import torch
             free, total = torch.cuda.mem_get_info(self.device_index)
-            return None, (total - free) / 1024 ** 2, total / 1024 ** 2
+            return {"utilization": None, "memory_used_mb": (total - free) / 1024 ** 2, "memory_total_mb": total / 1024 ** 2,
+                    "power_w": None, "temperature_c": None}
         return read_torch
 
     def _loop(self):
         while True:
             try:
-                utilization, used, total = self._reader()
-                self.snapshot = {"utilization": utilization, "memory_used_mb": used, "memory_total_mb": total}
+                self.snapshot = self._reader()
             except Exception:
                 pass
             time.sleep(self.interval)
 
-    # Chuỗi hiển thị: "GPU 97% | VRAM 5.00/8.00 GB"
+    # Chuỗi hiển thị: "GPU 97% | VRAM 5.00/8.00 GB | 85 W | 74°C"
     def text(self):
         s = self.snapshot
         parts = []
@@ -120,6 +139,10 @@ class GPUMonitor:
             parts.append(f"GPU {s['utilization']:.0f}%")
         if s["memory_used_mb"] is not None:
             parts.append(f"VRAM {s['memory_used_mb'] / 1024:,.2f}/{s['memory_total_mb'] / 1024:,.2f} GB")
+        if s["power_w"] is not None:
+            parts.append(f"{s['power_w']:.0f} W")
+        if s["temperature_c"] is not None:
+            parts.append(f"{s['temperature_c']:.0f}°C")
         return " | ".join(parts)
 
 # ============================================================

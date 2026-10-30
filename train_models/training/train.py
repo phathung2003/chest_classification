@@ -306,8 +306,8 @@ def train_one_fold(ctx, fold, train_folds_df):
 
         # Một dòng mỗi epoch (accuracy theo nhãn, chuẩn gradient và các chỉ số khác nằm trong history.csv)
         data_share = train_stats["data_wait_seconds"] / max(train_stats["train_seconds"], 1e-9)
-        print(f"Epoch {epoch:02d} | Train: [Loss: {train_stats['train_loss']:.4f}, Macro AUROC: {train_stats['train_auroc']:.4f}] | "
-              f"Validation: [Loss: {validation_loss:.4f}, Macro AUROC {auc:.4f}, AP {metrics['macro_ap']:.4f}] | "
+        print(f"Epoch: {epoch:02d} | Train: [Loss: {train_stats['train_loss']:.4f}, Macro AUROC: {train_stats['train_auroc']:.4f}] | "
+              f"Validation: [Loss: {validation_loss:.4f}, Macro AUROC: {auc:.4f}, AP: {metrics['macro_ap']:.4f}] | "
               f"Learning rate: {learning_rate:.1e} | Time: {time.perf_counter() - started:.0f}s ({train_stats['train_images_per_second']:.0f} ảnh/s, chờ dữ liệu {data_share:.0%}) | "
               + ("[Mô hình tốt nhất]" if improved
                  else f"Không cải thiện {no_improvement}/{tc['early_stop_patience']} "
