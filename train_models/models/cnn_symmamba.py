@@ -41,6 +41,9 @@ VARIANTS = {
     "random4"       : {"mixer": "mamba", "scan": "random4"},    # 4 hoán vị ngẫu nhiên cố định (đối chứng: thứ tự có quan trọng không)
 }
 
+# Cùng các biến thể nhưng bỏ đường tắt GAP (<tên>_noskip): logits chỉ đến từ Class Query Head, khối trộn token gánh toàn bộ quyết định
+VARIANTS.update({f"{name}_noskip": {**kwargs, "skip": False} for name, kwargs in list(VARIANTS.items())})
+
 
 # ============================================================
 # Tên mô hình theo biến thể (dùng làm tên thư mục kết quả)
@@ -229,9 +232,9 @@ def upsample2x(x):
 #   1. DenseNet121 (ImageNet): đặc trưng stride 16 (sau denseblock3) và stride 32 (sau norm5)
 #   2. Token đa tỉ lệ: chiếu hai mức về d_model, phóng stride 32 lên stride 16, cộng lại --> (IMAGE_SIZE / 16)^2 token
 #   3. Khối trộn token (Mamba-2 nhiều đường quét / Transformer / không trộn) + position embedding
-#   4. Logits = Class Query Head(token) + đường tắt GAP 1024 kênh (y hệt baseline DenseNet121)
+#   4. Logits = Class Query Head(token) + đường tắt GAP 1024 kênh (y hệt baseline DenseNet121); skip = False bỏ đường tắt
 class CNNSymMamba(nn.Module):
-    def __init__(self, num_classes, mixer = "mamba", scan = "sym4", d_model = 256, n_layers = 2, d_state = 64, headdim = 64, dropout = 0.2):
+    def __init__(self, num_classes, mixer = "mamba", scan = "sym4", d_model = 256, n_layers = 2, d_state = 64, headdim = 64, dropout = 0.2, skip = True):
         super().__init__()
         if config.IMAGE_SIZE % 32:
             raise ValueError("IMAGE_SIZE phải chia hết cho 32")
@@ -248,7 +251,7 @@ class CNNSymMamba(nn.Module):
 
         self.mixer = TokenMixer(mixer, d_model, n_layers, self.grid, scan, d_state, headdim)
         self.head = ClassQueryHead(d_model, num_classes)
-        self.skip = nn.Linear(1024, num_classes)
+        self.skip = nn.Linear(1024, num_classes) if skip else None
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
@@ -261,7 +264,10 @@ class CNNSymMamba(nn.Module):
             raise ValueError(f"Số token {tokens.size(1)} khác position embedding {self.pos.size(1)}; kiểm tra IMAGE_SIZE")
 
         tokens = self.mixer(tokens + self.pos)
-        return self.head(self.dropout(tokens)) + self.skip(self.dropout(c4.mean(dim = (2, 3))))
+        logits = self.head(self.dropout(tokens))
+        if self.skip is not None:
+            logits = logits + self.skip(self.dropout(c4.mean(dim = (2, 3))))
+        return logits
 
 
 # ============================================================
