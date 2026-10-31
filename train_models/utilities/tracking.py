@@ -51,13 +51,10 @@ def stable_hash(data):
 
 
 # ============================================================
-# Hash SHA-256 của một tệp
+# Hash SHA-256 của một tệp mã nguồn. Đổi CRLF (git checkout trên Windows) thành LF (Linux) trước khi hash,
+# để cùng một commit cho cùng chữ ký trên mọi hệ điều hành
 def file_hash(path):
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as f:
-        for block in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+    return hashlib.sha256(Path(path).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 # ============================================================

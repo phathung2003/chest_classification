@@ -5,6 +5,8 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
+import config
+
 
 # ============================================================
 # Tập dữ liệu NIH ChestX-ray14: mỗi dòng của dataframe là một ảnh, nhãn là vector nhị phân 14 lớp
@@ -14,7 +16,9 @@ class NIHChestXrayDataset(Dataset):
         self.df = dataframe.reset_index(drop = True).copy()
         self.classes = classes
         self.transform = transform
-        self.image_paths = self.df["image_path"].astype(str).tolist()
+        # image_path tương đối theo DATASET_DIRECTORY (dạng images/x.png) nên dùng được trên Windows và Linux;
+        # đường dẫn tuyệt đối được giữ nguyên
+        self.image_paths = [str(config.DATASET_DIRECTORY / path) for path in self.df["image_path"].astype(str)]
         self.labels = self.df[classes].to_numpy(dtype = np.float32)
 
     def __len__(self):

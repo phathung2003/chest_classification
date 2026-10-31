@@ -1,4 +1,5 @@
 import json
+import os
 import random
 
 import numpy as np
@@ -27,7 +28,26 @@ def load_dataset():
     test_df = pd.read_csv(config.TEST_DIRECTORY)
 
     validate_data(train_df, test_df, classes, number_of_folds)
+    check_image_files(train_df, test_df)
     return train_df, test_df, name, classes, number_of_folds
+
+
+# ============================================================
+# Mọi ảnh trong train_folds.csv / test.csv phải có trên đĩa. So tên tệp với danh sách thư mục nên phân biệt chữ hoa / thường
+# như Linux, kể cả khi chạy trên Windows; thiếu dữ liệu hoặc sai đường dẫn (chép sang máy khác) báo lỗi ngay khi khởi chạy
+def check_image_files(*frames):
+    listed, missing = {}, []
+    for frame in frames:
+        for relative in frame["image_path"].astype(str):
+            path = config.DATASET_DIRECTORY / relative
+            if path.parent not in listed:
+                listed[path.parent] = set(os.listdir(path.parent)) if path.parent.is_dir() else set()
+            if path.name not in listed[path.parent]:
+                missing.append(relative)
+    if missing:
+        raise FileNotFoundError(f"Thiếu {len(missing):,} ảnh, ví dụ: {missing[0]}\n"
+                                f"image_path phải là đường dẫn tương đối theo {config.DATASET_DIRECTORY} (dạng images/x.png); "
+                                "dữ liệu có đường dẫn tuyệt đối của máy khác thì chạy lại notebook tiền xử lý")
 
 
 # ============================================================
@@ -143,6 +163,8 @@ class SeededSamples(Dataset):
 # Tạo DataLoader, giữ worker suốt fold (PERSISTENT_WORKERS).
 # shuffle = True (tập huấn luyện): dùng EpochSampler, seed là seed của fold; gọi loader.sampler.set_epoch(epoch) trước mỗi epoch.
 # shuffle = False (Validation / Test): giữ nguyên thứ tự dataframe.
+# Worker khởi tạo bằng spawn trên mọi hệ điều hành: Windows chỉ có spawn; fork (mặc định của Linux) sao chép tiến trình
+# đang có luồng chạy (theo dõi GPU, tqdm) cùng các khóa của chúng, có thể làm worker bị treo.
 def create_dataloader(dataset_class, classes, device, dataframe, transform, shuffle, *, batch_size, seed):
     dataset = dataset_class(dataframe = dataframe, classes = classes, transform = transform)
     sampler = None
@@ -154,5 +176,5 @@ def create_dataloader(dataset_class, classes, device, dataframe, transform, shuf
     generator.manual_seed(int(seed))
 
     workers = int(config.NUMBER_OF_WORKERS)
-    loader = DataLoader(dataset, batch_size = int(batch_size), sampler = sampler, num_workers = workers, prefetch_factor = int(config.PREFETCH_FACTOR) if workers > 0 else None, pin_memory = device.type == "cuda", drop_last = False, worker_init_fn = _seed_worker, generator = generator, persistent_workers = bool(config.PERSISTENT_WORKERS and workers > 0))
+    loader = DataLoader(dataset, batch_size = int(batch_size), sampler = sampler, num_workers = workers, prefetch_factor = int(config.PREFETCH_FACTOR) if workers > 0 else None, pin_memory = device.type == "cuda", drop_last = False, worker_init_fn = _seed_worker, generator = generator, persistent_workers = bool(config.PERSISTENT_WORKERS and workers > 0), multiprocessing_context = "spawn" if workers > 0 else None)
     return dataset, loader
