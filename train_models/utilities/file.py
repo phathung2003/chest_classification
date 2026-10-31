@@ -9,7 +9,8 @@ import torch
 
 
 # ============================================================
-# Ghi tệp an toàn: ghi vào tệp tạm rồi thay thế, nên tệp đích không bao giờ bị ghi dở khi chương trình dừng giữa chừng
+# Ghi tệp an toàn: ghi vào tệp tạm, đẩy xuống đĩa rồi thay thế, nên tệp đích không bao giờ bị ghi dở
+# khi chương trình dừng giữa chừng, kể cả khi mất điện / máy tự khởi động lại
 def atomic_write(path, writer):
     path = Path(path)
     path.parent.mkdir(parents = True, exist_ok = True)
@@ -19,8 +20,10 @@ def atomic_write(path, writer):
     os.close(fd)
 
     try:
-        # Ghi dữ liệu rồi thay thế tệp gốc
+        # Ghi dữ liệu, đồng bộ xuống đĩa rồi thay thế tệp gốc
         writer(Path(temporary))
+        with open(temporary, "rb+") as f:
+            os.fsync(f.fileno())
         os.replace(temporary, path)
 
         # Đồng bộ metadata thư mục (POSIX)

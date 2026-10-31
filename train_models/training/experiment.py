@@ -1,3 +1,5 @@
+import pandas as pd
+
 import config
 from training.checkpoint import choose_run
 from training.context import ExperimentContext
@@ -9,7 +11,7 @@ from training.train import cleanup, train_one_fold
 from utilities.data import load_dataset, transform_setting
 from utilities.file import read_json, save_json, to_snake_case
 from utilities.log import GPUMonitor, capture_run_log, print_model_specification, print_run_summary
-from utilities.setting import device_info, set_fold, set_seed
+from utilities.setting import device_info, keep_system_awake, set_fold, set_seed
 from utilities.tracking import launch_record, make_signature, model_specification
 
 
@@ -17,6 +19,7 @@ from utilities.tracking import launch_record, make_signature, model_specificatio
 # Chạy K-Fold cho một mô hình:
 def run_experiment(model_name, dataset_class, model_factory, model_kwargs = None, *, loss_config, optimizer_config = None, scheduler_config = None, selection_metric = None):
     model_kwargs = dict(model_kwargs or {})
+    keep_system_awake()
 
     # 1. Cấu hình
     loss_config = validate_loss_config(loss_config)
@@ -35,6 +38,11 @@ def run_experiment(model_name, dataset_class, model_factory, model_kwargs = None
     signature, settings = make_signature(model_name, model_factory, model_kwargs, dataset_name, dataset_class, train_df, test_df, classes, folds, number_of_folds, loss_config, training_config)
     root = config.MODELS_OUTPUT_DIRECTORY / to_snake_case(dataset_name) / to_snake_case(model_name)
     output_directory = choose_run(root, signature, bool(config.RESUME_TRAINING), settings)
+
+    # Lượt chạy cùng cấu hình đã hoàn thành đủ mọi fold và Test --> không huấn luyện lại
+    if read_json(output_directory / "train_info.json").get("train_completed", False):
+        print(f"Bỏ qua {model_name}: đã hoàn thành tại {output_directory}")
+        return pd.read_csv(output_directory / "cross_validation_results.csv")
 
     with capture_run_log(output_directory, model_name = model_name, dataset_name = dataset_name, train_df = train_df, test_df = test_df, folds = folds, settings = settings, signature = signature, launch = launch):
         update_train_info(output_directory, append_launch = launch)

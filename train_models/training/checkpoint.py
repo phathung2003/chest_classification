@@ -141,24 +141,23 @@ def choose_run(result_directory, signature, resume, settings):
     runs = sorted((p for p in result_directory.glob("run_*") if p.is_dir() and p.name[4:].isdigit()), key = lambda p: int(p.name[4:]))
 
     if resume and runs:
-        latest = runs[-1]
-        manifest_path = latest / "train_info.json"
-
-        # Lượt chạy dở cùng chữ ký --> chạy tiếp
-        if manifest_path.exists():
-            info = read_json(manifest_path)
-            if not info.get("train_completed", False):
-                if info.get("signature") == signature:
-                    print(f"Huấn luyện tiếp lượt chạy: {latest}")
-                    return latest
-                print("Phát hiện cấu hình thay đổi so với lượt chạy dở gần nhất")
+        # Lượt chạy cùng chữ ký (mới nhất trước): đã hoàn thành --> dùng lại kết quả, chạy dở --> chạy tiếp
+        for run in reversed(runs):
+            manifest_path = run / "train_info.json"
+            if manifest_path.exists() and read_json(manifest_path).get("signature") == signature:
+                completed = read_json(manifest_path).get("train_completed", False)
+                print(f"{'Lượt chạy đã hoàn thành' if completed else 'Huấn luyện tiếp lượt chạy'}: {run}")
+                return run
 
         # Thư mục rỗng --> dùng lại
-        elif not any(latest.iterdir()):
-            save_json(manifest_path, {"signature": signature, "settings": settings, "train_completed": False})
-            return latest
-        else:
+        latest = runs[-1]
+        if not (latest / "train_info.json").exists():
+            if not any(latest.iterdir()):
+                save_json(latest / "train_info.json", {"signature": signature, "settings": settings, "train_completed": False})
+                return latest
             print(f"Không tìm thấy train_info.json tại {latest}")
+        else:
+            print("Không có lượt chạy nào cùng cấu hình")
 
     # Tạo lượt chạy mới
     next_number = int(runs[-1].name[4:]) + 1 if runs else 1

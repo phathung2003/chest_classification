@@ -40,6 +40,46 @@ def set_seed(seed = None):
 
 
 # ============================================================
+# Windows: giữ máy chạy liên tục trong lúc huấn luyện (hiệu lực tới khi tiến trình kết thúc, hệ điều hành khác bỏ qua)
+#   - Không cho máy ngủ / ngủ đông (màn hình vẫn tắt được)
+#   - Tắt Power Throttling (EcoQoS): tiến trình không bị hạ hiệu năng khi cửa sổ bị thu nhỏ / chạy nền
+#   - Tắt QuickEdit của console: bấm chuột vào cửa sổ console sẽ chặn mọi lệnh in, làm treo huấn luyện
+def keep_system_awake():
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class PowerThrottlingState(ctypes.Structure):
+            _fields_ = [("Version", wintypes.ULONG), ("ControlMask", wintypes.ULONG), ("StateMask", wintypes.ULONG)]
+
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.SetThreadExecutionState.argtypes = [wintypes.DWORD]
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.SetProcessInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+        kernel32.GetStdHandle.restype = wintypes.HANDLE
+        kernel32.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+
+        # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+        kernel32.SetThreadExecutionState(0x80000000 | 0x00000001)
+
+        # ProcessPowerThrottling = 4, PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 0x1 (StateMask = 0: tắt giới hạn)
+        state = PowerThrottlingState(1, 0x1, 0)
+        kernel32.SetProcessInformation(kernel32.GetCurrentProcess(), 4, ctypes.byref(state), ctypes.sizeof(state))
+
+        # Bỏ ENABLE_QUICK_EDIT_MODE (0x40), giữ các cờ khác, cần ENABLE_EXTENDED_FLAGS (0x80)
+        handle = kernel32.GetStdHandle(-10 & 0xFFFFFFFF)       # STD_INPUT_HANDLE
+        mode = wintypes.DWORD()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, (mode.value & ~0x40) | 0x80)
+    except (OSError, AttributeError):
+        pass
+
+
+# ============================================================
 # Danh sách fold cần chạy: tất cả, hoặc các fold trong SELECTED_FOLD
 def set_fold(number_of_folds):
     number_of_folds = int(number_of_folds)
