@@ -13,17 +13,18 @@ from utilities.metric import calculate_metrics, class_metrics_dataframe, with_pr
 from utilities.statistics import bootstrap_auroc_ci
 
 # ============================================================
-# Đánh giá mô hình
+# Đánh giá mô hình. Nhãn, xác suất và loss giữ trên GPU, chỉ chuyển về CPU một lần ở cuối
+# (thanh tiến trình đồng bộ PROGRESS_SYNC_STEPS batch một lần)
 @torch.no_grad()
 def evaluate(device, number_of_classes, model, loader, criterion = None, epoch = None):
     model.eval()
-    running_loss = 0.0
+    running_loss = torch.zeros((), dtype = torch.float64, device = device)
     target_batches, probability_batches = [], []
 
     description = f"Epoch {epoch:02d} [Kiểm thử]" if epoch is not None else "Kiểm tra"
     progress = progress_bar(loader, description, device)
     seen = 0
-    for images, targets in progress:
+    for step, (images, targets) in enumerate(progress, start = 1):
         images  = images.to(device, non_blocking = True)
         targets = targets.to(device, dtype = torch.float32, non_blocking = True)
 
@@ -34,22 +35,24 @@ def evaluate(device, number_of_classes, model, loader, criterion = None, epoch =
         logits = logits.float()
 
         if criterion is not None:
-            running_loss += criterion(logits, targets).item() * images.size(0)
+            running_loss += criterion(logits, targets).double() * images.size(0)
 
-        target_batches.append(targets.cpu().numpy())
-        probability_batches.append(torch.sigmoid(logits).cpu().numpy())
+        target_batches.append(targets)
+        probability_batches.append(torch.sigmoid(logits))
         seen += images.size(0)
 
-        if criterion is not None:
-            update_progress(progress, loss = running_loss / seen)
-        else:
-            update_progress(progress)
+        if step % config.PROGRESS_SYNC_STEPS == 0 or step == len(loader):
+            if criterion is not None:
+                update_progress(progress, loss = running_loss.item() / seen)
+            else:
+                update_progress(progress)
 
     if not target_batches:
         raise ValueError("Tập đánh giá rỗng")
 
-    targets = np.concatenate(target_batches, axis = 0)
-    probabilities = np.concatenate(probability_batches, axis = 0)
+    targets = torch.cat(target_batches).cpu().numpy()
+    probabilities = torch.cat(probability_batches).cpu().numpy()
+    running_loss = float(running_loss.item())
     metrics = calculate_metrics(number_of_classes, targets, probabilities, threshold = float(config.THRESHOLD))
     epoch_loss = running_loss / len(loader.dataset) if criterion is not None else None
 

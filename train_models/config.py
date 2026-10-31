@@ -42,6 +42,7 @@ SCHEDULER_FACTOR            = 0.5                                               
 OPTIMIZER_NAME              = "adamw"                                                                   # Optimizer mặc định: adam | adamw | sgd
 ADAM_BETAS                  = (0.9, 0.999)                                                              # Adam / AdamW: hệ số trung bình động của gradient và bình phương gradient
 ADAM_EPSILON                = 1e-8                                                                      # Adam / AdamW: hằng số ổn định số học
+ADAM_FUSED                  = True                                                                      # Adam / AdamW: cập nhật mọi tham số trong một kernel (cùng thuật toán, nhanh hơn, không đồng bộ CPU / GPU khi dùng AMP)
 SGD_MOMENTUM                = 0.0                                                                       # SGD: momentum
 SGD_NESTEROV                = False                                                                     # SGD: dùng Nesterov momentum
 SCHEDULER_NAME              = "reduce_on_plateau"                                                       # Scheduler mặc định: reduce_on_plateau | none
@@ -137,4 +138,5 @@ MIN_TITLE_WIDTH             = 30
 MIN_MESSAGE_WIDTH           = 20
 MIN_NUMBER_WIDTH            = 8
 CONSOLE_WIDTH               = 100                                                                       # Độ dài dòng "=" / "-" của tiêu đề
-GPU_MONITOR_INTERVAL        = 1.0                                                                       # Chu kỳ đọc GPU usage / VRAM cho thanh tiến trình (giây)
+GPU_MONITOR_INTERVAL        = 1.0                                                                       # Chu kỳ đọc GPU usage / VRAM / điện năng / nhiệt độ cho thanh tiến trình (giây)
+PROGRESS_SYNC_STEPS         = 20                                                                        # Số batch giữa hai lần đọc số liệu từ GPU (thanh tiến trình, kiểm tra Loss); mỗi lần đọc buộc CPU chờ GPU

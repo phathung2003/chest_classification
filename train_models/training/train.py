@@ -96,26 +96,23 @@ def is_improvement(score, best_score, has_best, higher_is_better, min_delta):
     return score > best_score + min_delta if higher_is_better else score < best_score - min_delta
 
 # ============================================================
-# Chuẩn L2 của toàn bộ gradient
-def _total_grad_norm(optimizer):
-    norms = [torch.linalg.vector_norm(p.grad.detach()) for g in optimizer.param_groups for p in g["params"]
-             if p.grad is not None]
-    return torch.linalg.vector_norm(torch.stack(norms)) if norms else torch.tensor(0.0)
-
-# ============================================================
-# Huấn luyện một epoch
+# Huấn luyện một epoch.
+# Mỗi lần đọc giá trị từ GPU (.item(), .cpu()) buộc CPU chờ GPU chạy xong, GPU rảnh trong lúc CPU chuẩn bị bước sau.
+# Mỗi bước chỉ đọc một lần ở đúng chỗ GradScaler vốn phải chờ (bước có bị bỏ qua không); loss, nhãn, logits và chuẩn
+# gradient giữ trên GPU, đọc về ở cuối epoch (thanh tiến trình và kiểm tra Loss hữu hạn: PROGRESS_SYNC_STEPS batch một lần).
 def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler, training_config, ema = None):
     grad_accum_steps = int(training_config["grad_accum_steps"])
     grad_clip_norm = training_config["grad_clip_norm"]
+    parameters = [p for g in optimizer.param_groups for p in g["params"]]
 
     model.train()
     criterion.train()
-    total_loss, correct, labels, n_samples, accumulated_samples = 0.0, 0, 0, 0, 0
-    truths, scores = [], []
-    grad_norms, amp_skipped_steps, data_wait_seconds = [], 0, 0.0
+    total_loss = torch.zeros((), dtype = torch.float64, device = device)
+    n_samples, accumulated_samples, amp_skipped_steps, data_wait_seconds = 0, 0, 0, 0.0
+    truths, logit_batches, grad_norms = [], [], []
     optimizer.zero_grad(set_to_none = True)
 
-    # Thời gian chờ dữ liệu = khoảng từ lúc xử lý xong batch trước tới lúc nhận batch sau (gồm cả khởi động worker)
+    # Thời gian chờ dữ liệu = khoảng từ lúc xử lý xong batch trước tới lúc nhận batch sau
     epoch_started = batch_finished = time.perf_counter()
     progress = progress_bar(loader, f"Epoch {epoch:02d} [Huấn luyện]", device)
     for step, (images, targets) in enumerate(progress, start = 1):
@@ -128,8 +125,6 @@ def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler, 
         with torch.autocast(device_type = device.type, dtype = torch.float16, enabled = bool(config.USE_AMP and device.type == "cuda")):
             logits = model(images)
         loss = criterion(logits.float(), targets)
-        if not torch.isfinite(loss).item():
-            raise FloatingPointError(f"Giá trị Loss không hợp lệ tại epoch {epoch}")
 
         # Cộng dồn gradient theo số mẫu (loss * batch_size), chia lại khi cập nhật --> trung bình theo mẫu
         scaler.scale(loss * batch_size).backward()
@@ -138,58 +133,60 @@ def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler, 
         # Cập nhật trọng số sau mỗi grad_accum_steps batch (hoặc ở batch cuối)
         if step % grad_accum_steps == 0 or step == len(loader):
             scaler.unscale_(optimizer)
-            for group in optimizer.param_groups:
-                for param in group["params"]:
-                    if param.grad is not None:
-                        param.grad.div_(accumulated_samples)
-            # Chuẩn gradient trước khi clip (đo sau unscale nên là giá trị thật)
-            if grad_clip_norm is not None:
-                grad_norm = torch.nn.utils.clip_grad_norm_([p for g in optimizer.param_groups for p in g["params"]], max_norm = float(grad_clip_norm))
-            else:
-                grad_norm = _total_grad_norm(optimizer)
+            gradients = [p.grad for p in parameters if p.grad is not None]
+            torch._foreach_div_(gradients, accumulated_samples)
 
-            # GradScaler giảm scale nghĩa là gradient tràn số FP16 và bước cập nhật này bị bỏ qua
-            scale_before = scaler.get_scale()
+            # Chuẩn gradient trước khi clip (đo sau unscale nên là giá trị thật)
+            grad_norm = torch.nn.utils.get_total_norm(gradients)
+            if grad_clip_norm is not None:
+                torch.nn.utils.clip_grads_with_norm_(parameters, float(grad_clip_norm), grad_norm)
+
+            # Chuẩn không hữu hạn <=> có gradient tràn số FP16 <=> GradScaler bỏ qua bước cập nhật này
+            stepped = bool(torch.isfinite(grad_norm).item())
             scaler.step(optimizer)
             scaler.update()
-            if scaler.is_enabled() and scaler.get_scale() < scale_before:
-                amp_skipped_steps += 1
-            else:
-                grad_norms.append(float(grad_norm))
+            if stepped:
+                grad_norms.append(grad_norm)
                 if ema is not None:
                     ema.update(model)
+            else:
+                amp_skipped_steps += 1
             optimizer.zero_grad(set_to_none = True)
             accumulated_samples = 0
 
         # Thống kê huấn luyện
-        total_loss += float(loss.detach()) * batch_size
+        total_loss.add_(loss.detach(), alpha = batch_size)
         n_samples += batch_size
-        probabilities = torch.sigmoid(logits.detach().float())
-        correct += int(((probabilities >= config.THRESHOLD) == targets.bool()).sum().item())
-        labels += targets.numel()
-        truths.append(targets.cpu().numpy())
-        scores.append(probabilities.cpu().numpy())
-        update_progress(progress, loss = total_loss / n_samples)
+        truths.append(targets)
+        logit_batches.append(logits.detach())
+
+        if step % config.PROGRESS_SYNC_STEPS == 0 or step == len(loader):
+            running_loss = total_loss.item() / n_samples
+            if not math.isfinite(running_loss):
+                raise FloatingPointError(f"Giá trị Loss không hợp lệ tại epoch {epoch} (trước batch {step})")
+            update_progress(progress, loss = running_loss)
         batch_finished = time.perf_counter()
 
     if n_samples == 0:
         raise ValueError("Tập huấn luyện không có dữ liệu")
     train_seconds = time.perf_counter() - epoch_started
 
-    # Macro AUROC trên các lớp có đủ nhãn dương và âm
-    y_true, y_prob = np.concatenate(truths), np.concatenate(scores)
+    # Accuracy theo nhãn và macro AUROC (trên các lớp có đủ nhãn dương và âm)
+    y_true = torch.cat(truths).cpu().numpy()
+    y_prob = torch.sigmoid(torch.cat(logit_batches).float()).cpu().numpy()
     aucs = [roc_auc_score(y_true[:, i], y_prob[:, i]) for i in range(y_true.shape[1])
             if np.unique(y_true[:, i]).size == 2]
+    grad_norms = torch.stack(grad_norms).cpu().numpy() if grad_norms else np.array([])
 
     return {
-        "train_loss"                : total_loss / n_samples,
-        "train_accuracy"            : correct / labels,
+        "train_loss"                : total_loss.item() / n_samples,
+        "train_accuracy"            : float(((y_prob >= config.THRESHOLD) == y_true.astype(bool)).mean()),
         "train_auroc"               : float(np.mean(aucs)) if aucs else float("nan"),
         "train_seconds"             : train_seconds,
         "data_wait_seconds"         : data_wait_seconds,
         "train_images_per_second"   : n_samples / train_seconds,
-        "grad_norm_mean"            : float(np.mean(grad_norms)) if grad_norms else float("nan"),
-        "grad_norm_max"             : float(np.max(grad_norms)) if grad_norms else float("nan"),
+        "grad_norm_mean"            : float(np.mean(grad_norms)) if grad_norms.size else float("nan"),
+        "grad_norm_max"             : float(np.max(grad_norms)) if grad_norms.size else float("nan"),
         "amp_skipped_steps"         : amp_skipped_steps,
     }
 

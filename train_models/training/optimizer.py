@@ -61,6 +61,7 @@ def _complete_optimizer_config(optimizer_config):
     if name in ("adam", "adamw"):
         result["betas"] = [float(b) for b in cfg.pop("betas", config.ADAM_BETAS)]
         result["eps"] = float(cfg.pop("eps", config.ADAM_EPSILON))
+        result["fused"] = bool(cfg.pop("fused", config.ADAM_FUSED))
         if len(result["betas"]) != 2 or not all(0 <= b < 1 for b in result["betas"]) or result["eps"] <= 0:
             raise ValueError("Adam: betas hoặc eps không hợp lệ")
     elif name == "sgd":
