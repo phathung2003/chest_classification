@@ -4,7 +4,7 @@ import random
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset, Sampler
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 
@@ -98,18 +98,61 @@ def _seed_worker(worker_id):
 
 
 # ============================================================
-# Tạo DataLoader. Seed quyết định thứ tự xáo trộn và seed của worker (tức là augmentation).
-# Train loader được tạo lại mỗi epoch với seed riêng và persistent_workers = False để worker nhận seed mới.
-def create_dataloader(dataset_class, classes, device, dataframe, transform, shuffle, *,
-                      batch_size, seed, persistent_workers = None):
+# Thứ tự ảnh của tập huấn luyện theo epoch: xáo trộn bằng (seed, epoch) và gắn cho mỗi ảnh một seed làm giàu ảnh riêng.
+# Sampler nằm ở tiến trình chính nên worker giữ nguyên được qua các epoch (không phải khởi động lại mỗi epoch).
+class EpochSampler(Sampler):
+    def __init__(self, size, seed):
+        self.size = int(size)
+        self.seed = int(seed)
+        self.epoch = None
+
+    # Gọi trước khi duyệt loader của mỗi epoch
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+
+    def __len__(self):
+        return self.size
+
+    def __iter__(self):
+        if self.epoch is None:
+            raise RuntimeError("Gọi set_epoch() trước khi duyệt train loader")
+        rng = np.random.default_rng([self.seed, self.epoch])
+        order = rng.permutation(self.size)
+        sample_seeds = rng.integers(0, 2 ** 63 - 1, size = self.size)
+        return iter([(int(sample_seeds[i]), int(i)) for i in order])
+
+
+# ============================================================
+# Đặt seed bộ sinh ngẫu nhiên CPU của torch (nguồn ngẫu nhiên của torchvision transforms) ngay trước khi đọc một ảnh:
+# làm giàu ảnh chỉ phụ thuộc (seed, epoch, ảnh), không phụ thuộc số worker hay worker nào xử lý batch
+class SeededSamples(Dataset):
+    def __init__(self, dataset):
+        self.dataset = dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, key):
+        sample_seed, index = key
+        with torch.random.fork_rng(devices = []):
+            torch.default_generator.manual_seed(sample_seed)
+            return self.dataset[index]
+
+
+# ============================================================
+# Tạo DataLoader, giữ worker suốt fold (PERSISTENT_WORKERS).
+# shuffle = True (tập huấn luyện): dùng EpochSampler, seed là seed của fold; gọi loader.sampler.set_epoch(epoch) trước mỗi epoch.
+# shuffle = False (Validation / Test): giữ nguyên thứ tự dataframe.
+def create_dataloader(dataset_class, classes, device, dataframe, transform, shuffle, *, batch_size, seed):
     dataset = dataset_class(dataframe = dataframe, classes = classes, transform = transform)
+    sampler = None
+    if shuffle:
+        sampler = EpochSampler(len(dataset), seed)
+        dataset = SeededSamples(dataset)
 
     generator = torch.Generator()
     generator.manual_seed(int(seed))
 
     workers = int(config.NUMBER_OF_WORKERS)
-    if persistent_workers is None:
-        persistent_workers = bool(config.PERSISTENT_WORKERS)
-
-    loader = DataLoader(dataset, batch_size = int(batch_size), shuffle = shuffle, num_workers = workers, prefetch_factor = int(config.PREFETCH_FACTOR) if workers > 0 else None, pin_memory = device.type == "cuda", drop_last = False, worker_init_fn = _seed_worker, generator = generator, persistent_workers = bool(persistent_workers and workers > 0))
+    loader = DataLoader(dataset, batch_size = int(batch_size), sampler = sampler, num_workers = workers, prefetch_factor = int(config.PREFETCH_FACTOR) if workers > 0 else None, pin_memory = device.type == "cuda", drop_last = False, worker_init_fn = _seed_worker, generator = generator, persistent_workers = bool(config.PERSISTENT_WORKERS and workers > 0))
     return dataset, loader

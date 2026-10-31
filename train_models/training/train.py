@@ -84,9 +84,9 @@ def save_history(fold_directory, history, classes):
         save_csv(fold_directory / "history_class_auroc.csv", class_frame)
 
 # ============================================================
-# Load seed
-def train_loader_seed(fold, epoch):
-    return int(config.SEED) + int(fold) * 100_000 + int(epoch)
+# Seed của train loader cho một fold (EpochSampler kết hợp thêm epoch)
+def train_loader_seed(fold):
+    return int(config.SEED) + int(fold) * 100_000
 
 # ============================================================
 # Kiểm tra độ cải thiện của mô hình
@@ -245,7 +245,8 @@ def train_one_fold(ctx, fold, train_folds_df):
     elif best_path.exists():
         raise RuntimeError(f"Có best_model.pt nhưng thiếu last_checkpoint.pt: {best_path}")
 
-    # DataLoader Validation: không xáo trộn, giữ worker giữa các epoch
+    # DataLoader: worker giữ nguyên suốt fold. Train: thứ tự và làm giàu ảnh theo (seed của fold, epoch), Validation: không xáo trộn
+    _, train_loader = create_dataloader(ctx.dataset_class, ctx.classes, ctx.device, train_df, ctx.train_transform, True, batch_size = ctx.batch_size, seed = train_loader_seed(fold))
     _, validation_loader = create_dataloader(ctx.dataset_class, ctx.classes, ctx.device, validation_df, ctx.eval_transform, False, batch_size = ctx.batch_size, seed = int(config.SEED))
 
     # 3. Vòng lặp epoch
@@ -259,10 +260,9 @@ def train_one_fold(ctx, fold, train_folds_df):
         if gpu_monitor is not None:
             gpu_monitor.reset_statistics("epoch")
 
-        # Huấn luyện (train loader tạo lại mỗi epoch với seed theo fold và epoch)
-        _, train_loader = create_dataloader(ctx.dataset_class, ctx.classes, ctx.device, train_df, ctx.train_transform, True, batch_size = ctx.batch_size, seed = train_loader_seed(fold, epoch), persistent_workers = False)
+        # Huấn luyện
+        train_loader.sampler.set_epoch(epoch)
         train_stats = train_one_epoch(epoch, ctx.device, model, train_loader, criterion, optimizer, scaler, tc, ema = ema)
-        del train_loader
 
         # Đánh giá Validation
         validation_started = time.perf_counter()
@@ -326,6 +326,7 @@ def train_one_fold(ctx, fold, train_folds_df):
         if not math.isfinite(train_stats["grad_norm_max"]):
             print("CẢNH BÁO: mọi bước cập nhật trong epoch đều bị AMP bỏ qua (gradient tràn số FP16)")
 
+    del train_loader, validation_loader
     if not best_path.exists():
         raise RuntimeError(f"Không lưu được mô hình tốt nhất cho fold {fold}")
 

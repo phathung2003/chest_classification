@@ -41,7 +41,7 @@ def detected_worker_limit():
 
 
 def create_loader(dataset, device, workers, prefetch_factor, seed):
-    """Match utilities.data.create_dataloader except for configurable prefetch."""
+    """Loader throughput only: training uses persistent workers (startup paid once per fold) and EpochSampler."""
     generator = torch.Generator()
     generator.manual_seed(int(seed))
 
@@ -55,7 +55,7 @@ def create_loader(dataset, device, workers, prefetch_factor, seed):
         drop_last = False,
         worker_init_fn = _seed_worker,
         generator = generator,
-        persistent_workers = False,  # Same behavior as training code.
+        persistent_workers = False,  # Fresh workers per trial so every trial includes startup time.
         timeout = 120 if workers > 0 else 0,
     )
 

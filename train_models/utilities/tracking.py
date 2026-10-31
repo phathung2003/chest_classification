@@ -31,8 +31,10 @@ PIPELINE_SOURCE_FILES = ("training/*.py", "utilities/data.py", "utilities/datase
 
 # Hằng số trong config.py KHÔNG đưa vào chữ ký: đường dẫn (phụ thuộc máy), điều khiển lượt chạy (được phép đổi khi chạy tiếp),
 # hiển thị / hiệu năng / công cụ ngoài (không đổi kết quả huấn luyện), giao thức chung (loss_config và training_config thực tế
-# đã nằm trong chữ ký). Tham số riêng của mô hình nằm trong tệp mô hình, đã vào chữ ký qua hash tệp mô hình
-CONFIG_EXCLUDED = {"ROOT_DIRECTORY", "ORIGINAL_DATASET_DIRECTORY", "DATASET_DIRECTORY", "FOLDS_DIRECTORY", "TRAIN_FOLDS_DIRECTORY", "TEST_DIRECTORY", "DATASET_INFO_DIRECTORY", "MODELS_OUTPUT_DIRECTORY", "TRAIN_ALL_FOLD", "SELECTED_FOLD", "RESUME_TRAINING", "REQUIRE_CLEAN_GIT", "PREFETCH_FACTOR", "PERSISTENT_WORKERS", "IMAGE_EXTENSION", "COMPARE_BOOTSTRAP_ITERATIONS", "INFERENCE_WARMUP_STEPS", "INFERENCE_TIMED_STEPS", "CONSOLE_WIDTH", "GPU_MONITOR_INTERVAL", "MIN_RESULT_WIDTH", "MIN_TITLE_WIDTH", "MIN_MESSAGE_WIDTH", "MIN_NUMBER_WIDTH", "EXPERIMENT_PROTOCOL"}
+# đã nằm trong chữ ký). Tham số riêng của mô hình nằm trong tệp mô hình, đã vào chữ ký qua hash tệp mô hình.
+# Số worker (từ 1 trở lên) không ảnh hưởng kết quả: thứ tự ảnh do EpochSampler quyết định, làm giàu ảnh dùng seed riêng
+# của từng ảnh (0 worker chỉ lệch ở mức làm tròn số thực vì biến đổi ảnh chạy đa luồng trong tiến trình chính)
+CONFIG_EXCLUDED = {"ROOT_DIRECTORY", "ORIGINAL_DATASET_DIRECTORY", "DATASET_DIRECTORY", "FOLDS_DIRECTORY", "TRAIN_FOLDS_DIRECTORY", "TEST_DIRECTORY", "DATASET_INFO_DIRECTORY", "MODELS_OUTPUT_DIRECTORY", "TRAIN_ALL_FOLD", "SELECTED_FOLD", "RESUME_TRAINING", "REQUIRE_CLEAN_GIT", "NUMBER_OF_WORKERS", "PREFETCH_FACTOR", "PERSISTENT_WORKERS", "PROGRESS_SYNC_STEPS", "IMAGE_EXTENSION", "COMPARE_BOOTSTRAP_ITERATIONS", "INFERENCE_WARMUP_STEPS", "INFERENCE_TIMED_STEPS", "CONSOLE_WIDTH", "GPU_MONITOR_INTERVAL", "MIN_RESULT_WIDTH", "MIN_TITLE_WIDTH", "MIN_MESSAGE_WIDTH", "MIN_NUMBER_WIDTH", "EXPERIMENT_PROTOCOL"}
 
 
 # ============================================================
@@ -111,7 +113,6 @@ def make_signature(model_name, model_factory, model_kwargs, dataset_name, datase
         "training_config"           : dict(training_config),
         "use_amp"                   : bool(config.USE_AMP),
         "threshold"                 : float(config.THRESHOLD),
-        "number_of_workers"         : int(config.NUMBER_OF_WORKERS),
 
         # Làm giàu ảnh
         "augmentation"              : {
@@ -127,7 +128,7 @@ def make_signature(model_name, model_factory, model_kwargs, dataset_name, datase
 
         # Tái lập
         "seed"                      : int(config.SEED),
-        "loader_seed_policy"        : "fold_epoch_seed_v2",
+        "loader_seed_policy"        : "epoch_sampler_per_image_seed_v3",
         "cudnn_deterministic"       : bool(config.CUDNN_DETERMINISTIC),
         "cudnn_benchmark"           : bool(config.CUDNN_BENCHMARK),
         "deterministic_algorithms"  : bool(config.DETERMINISTIC_ALGORITHMS),

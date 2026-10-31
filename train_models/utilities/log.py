@@ -348,7 +348,7 @@ def _print_run_header(run_directory, resumed_log, model_name, dataset_name, trai
     print_message("Gradient accum step", tc['grad_accum_steps'])
     print_message("Gradient clip norm", tc['grad_clip_norm'])
     print_message("EMA decay", tc.get('ema_decay'))
-    print_message("Number of worker", settings['number_of_workers'])
+    print_message("Number of worker", config.NUMBER_OF_WORKERS)
     print_message("Prefetch factor", config.PREFETCH_FACTOR)
     print_message("Số epoch tối đa", tc["epochs"])
     print_message("Patience", tc['early_stop_patience'])

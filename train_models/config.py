@@ -24,7 +24,7 @@ IMAGE_EXTENSION             = {".png", ".jpg", ".jpeg"}                         
 BATCH_SIZE                  = 32                                                                        # Số ảnh mỗi batch
 NUMBER_OF_WORKERS           = 4                                                                        # Số tiến trình tải dữ liệu song song
 PREFETCH_FACTOR             = 8                                                                         # Số batch mỗi worker tải trước
-PERSISTENT_WORKERS          = True                                                                      # Giữ worker giữa các epoch (chỉ loader Validation/Test)
+PERSISTENT_WORKERS          = True                                                                      # Giữ worker suốt fold (Train và Validation), không khởi động lại mỗi epoch
 
 # ============================================================
 # Huấn luyện
