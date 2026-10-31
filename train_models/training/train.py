@@ -214,7 +214,7 @@ def train_one_fold(ctx, fold, train_folds_df):
         print(f"Fold {fold} đã hoàn thành trước đó (epoch tốt nhất: {done['result']['best_epoch']})")
         return model, criterion, done["result"]
 
-    print(f"\n=== FOLD {fold} | Huấn luyện: {len(train_df):,} ảnh | Validation: {len(validation_df):,} ảnh ===")
+    print(f"\n=== Fold {fold} | Huấn luyện: {len(train_df):,} ảnh | Kiểm thử: {len(validation_df):,} ảnh ===")
 
     # 2. Khởi tạo (seed riêng cho từng fold: khởi tạo không phụ thuộc vào các fold chạy trước)
     set_seed(int(config.SEED) + fold)
@@ -311,11 +311,11 @@ def train_one_fold(ctx, fold, train_folds_df):
         # Một dòng mỗi epoch (accuracy theo nhãn, chuẩn gradient và các chỉ số khác nằm trong history.csv)
         data_share = train_stats["data_wait_seconds"] / max(train_stats["train_seconds"], 1e-9)
         print(f"Epoch: {epoch:02d} | Huấn luyện: [Loss: {train_stats['train_loss']:.4f}, Macro AUROC: {train_stats['train_auroc']:.4f}] | "
-              f"Validation: [Loss: {validation_loss:.4f}, Macro AUROC: {auc:.4f}, AP: {metrics['macro_ap']:.4f}] | "
+              f"Kiểm thử: [Loss: {validation_loss:.4f}, Macro AUROC: {auc:.4f}, AP: {metrics['macro_ap']:.4f}] | "
               f"\nTốc độ học: {learning_rate:.1e} | Tổng thời gian: {time.perf_counter() - started:.0f}s ({train_stats['train_images_per_second']:.0f} ảnh/s, chờ dữ liệu {data_share:.0%}) | "
               + ("[Mô hình tốt nhất]" if improved
                  else f"Không cải thiện {no_improvement}/{tc['early_stop_patience']} "
-                      f"(Tốt nhất: {selection_metric}: {best_score:.4f} ở epoch {best_epoch})"))
+                      f"(Tốt nhất: {selection_metric}: {best_score:.4f} ở Epoch {best_epoch:02d})"))
         
         if next_learning_rate < learning_rate and finished != True:
             print(f"Scheduler giảm learning rate: {learning_rate:.1e} -> {next_learning_rate:.1e}")

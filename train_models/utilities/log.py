@@ -360,7 +360,8 @@ def _print_run_header(run_directory, resumed_log, model_name, dataset_name, trai
     print_message("Hàm Loss", settings["loss_config"])
     print_message("Hàm Optimizer", tc["optimizer"])
     print_message("Hàm Scheduler", tc["scheduler"])
-    print_message("Tiêu chí chọn mô hình", f"{tc['selection_metric']}\n")
+    print_message("Tiêu chí chọn mô hình", tc['selection_metric'])
+    print_message("Đánh giá trên tập kiểm tra", f"{settings['evaluate_fold_models_on_test']}\n")
     
     # Hàm làm giàu ảnh
     print_heading("Cấu hình hàm làm giàu ảnh (Ứng với cài đặt trong file config.py)")

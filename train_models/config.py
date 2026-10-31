@@ -22,7 +22,8 @@ IMAGE_EXTENSION             = {".png", ".jpg", ".jpeg"}                         
 # ============================================================
 # DataLoader
 BATCH_SIZE                  = 32                                                                        # Số ảnh mỗi batch
-NUMBER_OF_WORKERS           = 4                                                                        # Số tiến trình tải dữ liệu song song
+GRAD_ACCUM_STEPS            = 1                                                                         # Số batch cộng dồn gradient trước mỗi lần cập nhật
+NUMBER_OF_WORKERS           = 4                                                                         # Số tiến trình tải dữ liệu song song
 PREFETCH_FACTOR             = 8                                                                         # Số batch mỗi worker tải trước
 PERSISTENT_WORKERS          = True                                                                      # Giữ worker suốt fold (Train và Validation), không khởi động lại mỗi epoch
 
@@ -31,10 +32,10 @@ PERSISTENT_WORKERS          = True                                              
 EPOCHS                      = 100                                                                       # Số epoch tối đa
 LEARNING_RATE               = 0.0001                                                                    # Learning rate ban đầu
 WEIGHT_DECAY                = 0.0005                                                                    # Weight decay (mặc định cho AdamW)
-GRAD_ACCUM_STEPS            = 1                                                                         # Số batch cộng dồn gradient trước mỗi lần cập nhật
+
 GRAD_CLIP_NORM              = None                                                                      # Ngưỡng clip gradient (ví dụ 1.0); None = không clip
 USE_AMP                     = True                                                                      # Huấn luyện mixed precision FP16 trên GPU
-EMA_DECAY                   = 0.9995                                                                    # EMA trọng số: hệ số tối đa (khởi động (1 + n) / (10 + n)); Validation, chọn và lưu mô hình bằng trọng số EMA; None = tắt
+EMA_DECAY                   = 0.9995                                                         # EMA trọng số: hệ số tối đa (khởi động (1 + n) / (10 + n)); Validation, chọn và lưu mô hình bằng trọng số EMA; None = tắt
 PATIENCE                    = 5                                                                         # Early stopping: số epoch không cải thiện tối đa
 MIN_DELTA                   = 0                                                                         # Early stopping: mức cải thiện tối thiểu
 SCHEDULER_PATIENCE          = 2                                                                         # ReduceLROnPlateau: số epoch chờ trước khi giảm LR
