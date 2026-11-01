@@ -10,14 +10,30 @@ train_models/
 ├── worker_frefetch_benchmark.py  # Đo tốc độ DataLoader theo số worker / prefetch
 │
 ├── preprocess/
-│   └── nih_chestxray_14.ipynb    # Tiền xử lý: resize ảnh, chia Fold theo bệnh nhân, giữ tập Test chính thức
+│   ├── nih_chestxray_14.ipynb    # Tiền xử lý: resize ảnh, chia Fold theo bệnh nhân, giữ tập Test chính thức
+│   ├── resize_images.py          # Bộ ảnh ở kích thước khác (ví dụ 448) trong dataset/images_<kích thước>/, không đụng images/ và CSV; chọn bằng IMAGE_SIZE
+│   └── align_midline.py          # Căn đường giữa cơ thể bằng mặt nạ phổi CheXmask rồi resize: dataset/images_<kích thước>_aligned/; chọn bằng IMAGE_VARIANT = "aligned"
 │
 ├── models/                   # Mỗi tệp là một kiến trúc, chạy trực tiếp bằng python models/<tệp>.py
 │   ├── densenet121.py        # Baseline DenseNet121 (GAP + Linear)
 │   ├── cnn_mamba.py          # DenseNet121 + Mamba
 │   ├── cnn_bimamba.py        # DenseNet121 đa tỉ lệ + quét Mamba 2D + Class Query Head (có công tắc ablation)
 │   ├── chexnet.py, chexnet2.py   # Tái hiện CheXNet theo bài báo (cấu hình riêng, không thuộc phép so sánh chung)
-│   └── run_all.py            # Hàng đợi chạy liên tục các mô hình so sánh với cùng giao thức: mỗi (mô hình, fold) một tiến trình con, tự chạy lại khi lỗi
+│   ├── run_all.py            # Hàng đợi chạy liên tục các mô hình so sánh với cùng giao thức: mỗi (mô hình, fold) một tiến trình con, tự chạy lại khi lỗi
+│   ├── clis_mamba.py         # CLIS-Mamba: ConvNeXt-T stage 1-3 + SS2D 4 tuyến (kernel mamba-ssm), biến thể m_ras, m_clis, m_rand, m_clis4, gatedconv, attn, flipdiff
+│   ├── convnext_tiny.py      # Baseline ConvNeXt-T đầy đủ (E1 của nghiên cứu CLIS)
+│   └── run_clis.py           # Hàng đợi nghiên cứu CLIS: giao thức CLIS_CONFIG / CLIS_PROTOCOL, nhiều seed, tiến trình con, tự chạy lại
+│
+├── analysis/
+│   ├── benchmark_clis.py     # VRAM đỉnh / thời gian một bước theo độ phân giải và micro-batch (cổng G0, E5)
+│   └── compare_clis.py       # So sánh ghép cặp: trung bình qua seed, bootstrap theo bệnh nhân, nhóm L / C, tương tác ΔL - ΔC
+│
+├── prereg/
+│   └── analysis_plan.md      # Bản nháp đăng ký trước kế hoạch phân tích của nghiên cứu CLIS (chốt trước cổng G3)
+│
+├── tests/
+│   ├── test_clis_mamba.py    # Cổng G0: hoán vị, kernel selective scan khớp bản tham chiếu, độc lập giữa các tuyến, số tham số, CAM, checkpointing
+│   └── test_clis_protocol.py # RLE CheXmask, căn đường giữa, không lật ngang, lịch LR warmup + cosine, nhóm không weight decay
 │
 ├── training/                 # Quy trình huấn luyện và đánh giá
 │   ├── experiment.py         # run_experiment(): điều phối toàn bộ thí nghiệm K-Fold
@@ -122,4 +138,31 @@ So sánh hai mô hình sau khi cả hai đã chạy đủ fold:
 
 ```
 python compare_models.py <run_A>/test_ensemble/test_predictions.csv <run_B>/test_ensemble/test_predictions.csv --name-a "CNN BiMamba" --name-b "DenseNet121" --output comparison.json
+```
+
+## Nghiên cứu CLIS-Mamba (WSL2)
+
+Biến thể SS2D cần kernel `selective_scan_cuda` của mamba-ssm, chỉ có trong WSL2: env conda `mamba-main` (torch 2.4, mamba-ssm 2.2.2). Repo đọc trực tiếp từ `/mnt/e`. Mọi mô hình của nghiên cứu (DenseNet121, ConvNeXt-T, các biến thể CLIS-Mamba) dùng chung `CLIS_CONFIG` + `CLIS_PROTOCOL` trong `config.py`:
+
+- 512 px, ảnh đã căn đường giữa, không lật ngang;
+- micro-batch 8 × tích lũy 4, BF16, BCE;
+- AdamW: backbone 1e-4, lớp mới 5e-4, weight decay 0.05 (không áp dụng cho bias / norm / mã hóa vị trí / A_log, D, dt_bias);
+- warmup 1 epoch rồi cosine, 20 epoch, patience 4;
+- fold 1 làm Validation; tập Test bị khóa (`EVALUATE_FOLD_MODELS_ON_TEST = False`) tới cổng G3.
+
+```
+wsl -d Ubuntu-24.04
+conda activate mamba-main
+cd "/mnt/e/New folder/chest_classification/train_models"
+
+python tests/test_clis_mamba.py              # Cổng G0: phải 0 lỗi, 0 bỏ qua
+python tests/test_clis_protocol.py
+python analysis/benchmark_clis.py            # VRAM / thời gian ở 512, 768, 1024 px --> chốt độ phân giải
+
+python preprocess/align_midline.py 512 --chexmask <CheXmask>/OriginalResolution/ChestX-Ray8.csv --check 50   # Kiểm quy ước RLE bằng mắt trước
+python preprocess/align_midline.py 512 --chexmask <CheXmask>/OriginalResolution/ChestX-Ray8.csv
+
+python models/run_clis.py densenet121 convnext_t --seeds 42 43 44                 # E1
+python models/run_clis.py m_ras m_clis m_rand gatedconv attn flipdiff             # E2 / E3 ở 512 px
+python analysis/compare_clis.py --a "<m_clis>/run_*/fold_1/oof_predictions.csv" --b "<m_ras>/run_*/fold_1/oof_predictions.csv" --name-a M-clis --name-b M-ras
 ```
