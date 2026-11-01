@@ -340,7 +340,8 @@ def _print_run_header(run_directory, resumed_log, model_name, dataset_name, trai
     print_message("Tổng số Fold được chia", settings['number_of_folds'])
     print_message("Fold được chọn", folds)
     print_message("Số lớp", len(settings["classes"]))
-    print_message("Kích cỡ ảnh", f"{settings['image_size']}\n")
+    print_message("Kích cỡ ảnh", settings["image_size"])
+    print_message("Bộ ảnh", f"{settings['config'].get('IMAGE_VARIANT') or 'gốc'}\n")
 
     # Cấu hình huấn luyện
     print_heading("Cấu hình huấn luyện (Ứng với cài đặt trong file config.py)")
@@ -372,7 +373,7 @@ def _print_run_header(run_directory, resumed_log, model_name, dataset_name, trai
     # Cấu hình biến ngẫu nhiên
     print_heading("Cấu hình biến ngẫu nhiên (Ứng với cài đặt trong file config.py)")
     print_message("Seed", settings["seed"])
-    print_message("Use AMP", settings["use_amp"])
+    print_message("Use AMP", f"{settings['use_amp']} ({settings['config'].get('AMP_DTYPE', 'float16')})")
     print_message("cuDNN deterministic", settings["cudnn_deterministic"])
     print_message("cuDNN benchmark", settings["cudnn_benchmark"])
     print_message("Deterministic algorithms", f"{settings['deterministic_algorithms']}\n")

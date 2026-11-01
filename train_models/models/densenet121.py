@@ -26,6 +26,8 @@ dataset_class = NIHChestXrayDataset
 # ============================================================
 # Mô hình: DenseNet-121
 class DenseNetBaseline(nn.Module):
+    PRETRAINED_MODULES = ("cnn",)                                  # Khối dùng trọng số ImageNet (nhóm LR backbone)
+
     def __init__(self, num_classes):
         super().__init__()
         self.cnn = densenet121(weights = DenseNet121_Weights.IMAGENET1K_V1).features

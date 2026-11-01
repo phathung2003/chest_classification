@@ -21,6 +21,24 @@ def device_info():
 
 
 # ============================================================
+# Ghi đè hằng số của config.py trước khi chạy (ví dụ config.CLIS_CONFIG); tên không có trong config.py --> báo lỗi
+def apply_config(overrides):
+    unknown = [name for name in overrides if not hasattr(config, name)]
+    if unknown:
+        raise KeyError(f"config.py không có các hằng số {unknown}")
+    for name, value in overrides.items():
+        setattr(config, name, value)
+
+
+# ============================================================
+# Kiểu dữ liệu của autocast theo AMP_DTYPE
+def amp_dtype():
+    if config.AMP_DTYPE not in ("float16", "bfloat16"):
+        raise ValueError(f"AMP_DTYPE phải là float16 | bfloat16, nhận {config.AMP_DTYPE!r}")
+    return getattr(torch, config.AMP_DTYPE)
+
+
+# ============================================================
 # Đặt seed cho Python / NumPy / PyTorch và bật chế độ tất định theo config.py.
 # CUBLAS_WORKSPACE_CONFIG cần có trước khi CUDA khởi tạo (các tệp mô hình đặt ở đầu tệp).
 def set_seed(seed = None):

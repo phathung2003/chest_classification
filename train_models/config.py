@@ -32,9 +32,11 @@ PERSISTENT_WORKERS          = True                                              
 EPOCHS                      = 100                                                                       # Số epoch tối đa
 LEARNING_RATE               = 0.0001                                                                    # Learning rate ban đầu
 WEIGHT_DECAY                = 0.0005                                                                    # Weight decay (mặc định cho AdamW)
+NEW_MODULE_LR_MULTIPLIER    = 1.0                                                                       # LR lớp mới (neck, khối trộn, đầu phân loại) = LEARNING_RATE x hệ số; backbone tiền huấn luyện (PRETRAINED_MODULES của mô hình) giữ LEARNING_RATE; 1.0 = một LR chung
 
 GRAD_CLIP_NORM              = None                                                                      # Ngưỡng clip gradient (ví dụ 1.0); None = không clip
-USE_AMP                     = True                                                                      # Huấn luyện mixed precision FP16 trên GPU
+USE_AMP                     = True                                                                      # Huấn luyện mixed precision trên GPU (kiểu AMP_DTYPE)
+AMP_DTYPE                   = "float16"                                                                 # Kiểu AMP: float16 (kèm GradScaler) | bfloat16 (cùng dải số với FP32, không cần GradScaler)
 EMA_DECAY                   = 0.9995                                                         # EMA trọng số: hệ số tối đa (khởi động (1 + n) / (10 + n)); Validation, chọn và lưu mô hình bằng trọng số EMA; None = tắt
 PATIENCE                    = 5                                                                         # Early stopping: số epoch không cải thiện tối đa
 MIN_DELTA                   = 0                                                                         # Early stopping: mức cải thiện tối thiểu
@@ -46,8 +48,9 @@ ADAM_EPSILON                = 1e-8                                              
 ADAM_FUSED                  = True                                                                      # Adam / AdamW: cập nhật mọi tham số trong một kernel (cùng thuật toán, nhanh hơn, không đồng bộ CPU / GPU khi dùng AMP)
 SGD_MOMENTUM                = 0.0                                                                       # SGD: momentum
 SGD_NESTEROV                = False                                                                     # SGD: dùng Nesterov momentum
-SCHEDULER_NAME              = "reduce_on_plateau"                                                       # Scheduler mặc định: reduce_on_plateau | none
+SCHEDULER_NAME              = "reduce_on_plateau"                                                       # Scheduler mặc định: reduce_on_plateau | warmup_cosine | none
 SCHEDULER_THRESHOLD         = 1e-4                                                                      # ReduceLROnPlateau: mức thay đổi tối thiểu được tính là cải thiện
+SCHEDULER_WARMUP_EPOCHS     = 1                                                                         # warmup_cosine: LR tăng tuyến tính trong số epoch này rồi giảm theo cosine về 0 ở epoch EPOCHS (cập nhật mỗi bước tối ưu)
 THRESHOLD                   = 0.5                                                                       # Ngưỡng mặc định để tính Precision/Recall/F1
 RESUME_TRAINING             = True                                                                      # Chạy tiếp lượt chạy dở nếu chữ ký cấu hình khớp
 
@@ -122,6 +125,7 @@ EXPERIMENT_PROTOCOL = {
         "name"              : OPTIMIZER_NAME,
         "lr"                : LEARNING_RATE,
         "weight_decay"      : WEIGHT_DECAY,
+        "new_module_lr_multiplier": NEW_MODULE_LR_MULTIPLIER,
     },
     "scheduler_config": {
         "name"              : SCHEDULER_NAME,

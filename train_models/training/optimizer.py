@@ -6,6 +6,7 @@ import torch
 import config
 
 SELECTION_METRICS = ("macro_auroc", "validation_loss")
+STEP_SCHEDULERS = ("warmup_cosine",)                                       # Scheduler cập nhật sau mỗi bước tối ưu (các scheduler khác: mỗi epoch)
 
 
 # ============================================================
@@ -57,6 +58,8 @@ def _complete_optimizer_config(optimizer_config):
         "name"          : name,
         "lr"            : float(cfg.pop("lr", config.LEARNING_RATE)),
         "weight_decay"  : float(cfg.pop("weight_decay", config.WEIGHT_DECAY if name == "adamw" else 0.0)),
+        "new_module_lr_multiplier": float(cfg.pop("new_module_lr_multiplier", 1.0)),
+        "no_weight_decay_1d": bool(cfg.pop("no_weight_decay_1d", False)),
     }
     if name in ("adam", "adamw"):
         result["betas"] = [float(b) for b in cfg.pop("betas", config.ADAM_BETAS)]
@@ -76,6 +79,8 @@ def _complete_optimizer_config(optimizer_config):
         raise ValueError("Learning rate phải là số dương")
     if not math.isfinite(result["weight_decay"]) or result["weight_decay"] < 0:
         raise ValueError("Weight decay phải >= 0")
+    if not math.isfinite(result["new_module_lr_multiplier"]) or result["new_module_lr_multiplier"] <= 0:
+        raise ValueError("new_module_lr_multiplier phải là số dương")
     return result
 
 
@@ -89,8 +94,19 @@ def _complete_scheduler_config(scheduler_config, selection_metric):
         if cfg:
             raise ValueError(f"Scheduler 'none' không nhận các khóa {sorted(cfg)}")
         return {"name": "none"}
+    if name == "warmup_cosine":
+        result = {
+            "name"          : name,
+            "warmup_epochs" : float(cfg.pop("warmup_epochs", config.SCHEDULER_WARMUP_EPOCHS)),
+            "min_lr_ratio"  : float(cfg.pop("min_lr_ratio", 0.0)),
+        }
+        if cfg:
+            raise ValueError(f"Scheduler 'warmup_cosine' không nhận các khóa {sorted(cfg)}")
+        if not math.isfinite(result["warmup_epochs"]) or result["warmup_epochs"] < 0 or not 0 <= result["min_lr_ratio"] < 1:
+            raise ValueError("warmup_cosine: warmup_epochs phải >= 0, min_lr_ratio thuộc [0, 1)")
+        return result
     if name != "reduce_on_plateau":
-        raise ValueError(f"Scheduler '{name}' không được hỗ trợ (reduce_on_plateau | none)")
+        raise ValueError(f"Scheduler '{name}' không được hỗ trợ (reduce_on_plateau | warmup_cosine | none)")
 
     expected_mode = "min" if selection_metric == "validation_loss" else "max"
     result = {
@@ -111,20 +127,69 @@ def _complete_scheduler_config(scheduler_config, selection_metric):
 
 
 # ============================================================
-# Khởi tạo optimizer từ cấu hình đã hoàn chỉnh
-def make_optimizer(parameters, optimizer_config):
-    cfg = dict(optimizer_config)
-    name = cfg.pop("name")
-    if name == "sgd":
-        return torch.optim.SGD(parameters, **cfg)
-    cfg["betas"] = tuple(cfg["betas"])
-    return (torch.optim.Adam if name == "adam" else torch.optim.AdamW)(parameters, **cfg)
+# Nhóm tham số theo learning rate: backbone tiền huấn luyện (các khối trong model.PRETRAINED_MODULES) dùng lr;
+# lớp mới khởi tạo ngẫu nhiên (neck, khối trộn token, đầu phân loại) và tham số học được của Loss dùng lr x multiplier.
+# multiplier = 1.0 giữ một nhóm duy nhất như trước (cùng thứ tự tham số, kết quả không đổi).
+# no_weight_decay_1d = True: tách thêm mỗi nhóm thành phần có / không weight decay; không decay tham số 1 chiều (bias, norm,
+# layer scale) và các tên trong model.no_weight_decay() (quy ước timm, ví dụ mã hóa vị trí, A_log / D / dt_bias của SSM)
+def parameter_groups(model, criterion, lr, multiplier, no_weight_decay_1d = False):
+    loss_parameters = [p for p in criterion.parameters() if p.requires_grad]
+    if multiplier == 1.0:
+        groups = [{"params": list(model.parameters()) + loss_parameters}]
+    else:
+        names = getattr(model, "PRETRAINED_MODULES", None)
+        if not names:
+            raise ValueError(f"{type(model).__name__} chưa khai báo PRETRAINED_MODULES (tên các khối dùng trọng số tiền huấn luyện) "
+                             "nên không tách được learning rate backbone / lớp mới")
+        pretrained = {id(p) for name in names for p in getattr(model, name).parameters()}
+        backbone = [p for p in model.parameters() if id(p) in pretrained]
+        new = [p for p in model.parameters() if id(p) not in pretrained] + loss_parameters
+        if not backbone or not new:
+            raise ValueError(f"{type(model).__name__}: nhóm backbone ({len(backbone)} tham số) hoặc lớp mới ({len(new)} tham số) rỗng")
+        groups = [{"params": backbone, "lr": lr}, {"params": new, "lr": lr * multiplier}]
+    if not no_weight_decay_1d:
+        return groups
+
+    named = set(model.no_weight_decay()) if hasattr(model, "no_weight_decay") else set()
+    exempt = {id(p) for name, p in model.named_parameters() if p.ndim <= 1 or name in named} | {id(p) for p in loss_parameters if p.ndim <= 1}
+    split = []
+    for group in groups:
+        decay = [p for p in group["params"] if id(p) not in exempt]
+        no_decay = [p for p in group["params"] if id(p) in exempt]
+        split += ([{**group, "params": decay}] if decay else []) + ([{**group, "params": no_decay, "weight_decay": 0.0}] if no_decay else [])
+    return split
 
 
 # ============================================================
-# Khởi tạo scheduler từ cấu hình đã hoàn chỉnh (None nếu không dùng)
-def make_scheduler(optimizer, scheduler_config):
+# Khởi tạo optimizer từ cấu hình đã hoàn chỉnh
+def make_optimizer(model, criterion, optimizer_config):
+    cfg = dict(optimizer_config)
+    name = cfg.pop("name")
+    groups = parameter_groups(model, criterion, cfg["lr"], cfg.pop("new_module_lr_multiplier"), cfg.pop("no_weight_decay_1d"))
+    if name == "sgd":
+        return torch.optim.SGD(groups, **cfg)
+    cfg["betas"] = tuple(cfg["betas"])
+    return (torch.optim.Adam if name == "adam" else torch.optim.AdamW)(groups, **cfg)
+
+
+# ============================================================
+# Khởi tạo scheduler từ cấu hình đã hoàn chỉnh (None nếu không dùng).
+# warmup_cosine cần số bước tối ưu mỗi epoch: hệ số LR tăng tuyến tính tới 1 sau warmup_epochs, rồi giảm theo cosine
+# về min_lr_ratio ở cuối epoch thứ `epochs`
+def make_scheduler(optimizer, scheduler_config, steps_per_epoch = None, epochs = None):
     cfg = dict(scheduler_config)
-    if cfg.pop("name") == "none":
+    name = cfg.pop("name")
+    if name == "none":
         return None
+    if name == "warmup_cosine":
+        warmup = round(cfg["warmup_epochs"] * int(steps_per_epoch))
+        total = max(int(epochs) * int(steps_per_epoch), warmup + 1)
+        floor = cfg["min_lr_ratio"]
+
+        def factor(step):
+            if step < warmup:
+                return (step + 1) / warmup
+            progress = min((step - warmup) / max(total - warmup, 1), 1.0)
+            return floor + (1 - floor) * 0.5 * (1 + math.cos(math.pi * progress))
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
     return torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, **cfg)

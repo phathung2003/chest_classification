@@ -16,6 +16,7 @@ from torch.utils.flop_counter import FlopCounterMode
 
 import config
 from utilities.file import json_clean
+from utilities.setting import amp_dtype
 
 # Truy vết thí nghiệm: mọi thông tin được ghi vào train_info.json
 #   - Chữ ký: hash của mô hình, dữ liệu, cấu hình và mã nguồn (quyết định chạy tiếp hay tạo lượt chạy mới)
@@ -34,7 +35,7 @@ PIPELINE_SOURCE_FILES = ("training/*.py", "utilities/data.py", "utilities/datase
 # đã nằm trong chữ ký). Tham số riêng của mô hình nằm trong tệp mô hình, đã vào chữ ký qua hash tệp mô hình.
 # Số worker (từ 1 trở lên) không ảnh hưởng kết quả: thứ tự ảnh do EpochSampler quyết định, làm giàu ảnh dùng seed riêng
 # của từng ảnh (0 worker chỉ lệch ở mức làm tròn số thực vì biến đổi ảnh chạy đa luồng trong tiến trình chính)
-CONFIG_EXCLUDED = {"ROOT_DIRECTORY", "ORIGINAL_DATASET_DIRECTORY", "DATASET_DIRECTORY", "FOLDS_DIRECTORY", "TRAIN_FOLDS_DIRECTORY", "TEST_DIRECTORY", "DATASET_INFO_DIRECTORY", "MODELS_OUTPUT_DIRECTORY", "TRAIN_ALL_FOLD", "SELECTED_FOLD", "RESUME_TRAINING", "REQUIRE_CLEAN_GIT", "NUMBER_OF_WORKERS", "PREFETCH_FACTOR", "PERSISTENT_WORKERS", "PROGRESS_SYNC_STEPS", "IMAGE_EXTENSION", "COMPARE_BOOTSTRAP_ITERATIONS", "INFERENCE_WARMUP_STEPS", "INFERENCE_TIMED_STEPS", "CONSOLE_WIDTH", "GPU_MONITOR_INTERVAL", "MIN_RESULT_WIDTH", "MIN_TITLE_WIDTH", "MIN_MESSAGE_WIDTH", "MIN_NUMBER_WIDTH", "EXPERIMENT_PROTOCOL"}
+CONFIG_EXCLUDED = {"ROOT_DIRECTORY", "ORIGINAL_DATASET_DIRECTORY", "DATASET_DIRECTORY", "FOLDS_DIRECTORY", "TRAIN_FOLDS_DIRECTORY", "TEST_DIRECTORY", "DATASET_INFO_DIRECTORY", "MODELS_OUTPUT_DIRECTORY", "TRAIN_ALL_FOLD", "SELECTED_FOLD", "RESUME_TRAINING", "REQUIRE_CLEAN_GIT", "NUMBER_OF_WORKERS", "PREFETCH_FACTOR", "PERSISTENT_WORKERS", "PROGRESS_SYNC_STEPS", "IMAGE_EXTENSION", "COMPARE_BOOTSTRAP_ITERATIONS", "INFERENCE_WARMUP_STEPS", "INFERENCE_TIMED_STEPS", "CONSOLE_WIDTH", "GPU_MONITOR_INTERVAL", "MIN_RESULT_WIDTH", "MIN_TITLE_WIDTH", "MIN_MESSAGE_WIDTH", "MIN_NUMBER_WIDTH", "EXPERIMENT_PROTOCOL", "CLIS_CONFIG", "CLIS_PROTOCOL"}
 
 
 # ============================================================
@@ -200,7 +201,7 @@ def environment_info():
         "python"    : sys.version.split()[0],
         "platform"  : platform.platform(),
         "packages"  : {name: version(name) for name in ("torch", "torchvision", "numpy", "pandas", "scikit-learn",
-                                                        "scipy", "pillow", "mambapy", "mamba-ssm")},
+                                                        "scipy", "pillow", "timm", "mambapy", "mamba-ssm")},
         "gpu"       : gpu,
     }
 
@@ -226,13 +227,16 @@ def model_specification(model_factory, classes, device, model_kwargs, batch_size
 
     with FlopCounterMode(display = False) as counter:
         model(input_tensor)
-    flops = int(counter.get_total_flops())
+    # Phép toán bộ đếm không thấy (kernel CUDA tự viết, ví dụ selective scan): mô hình tự khai báo qua uncounted_flops()
+    uncounted = int(model.uncounted_flops(config.IMAGE_SIZE, config.IMAGE_SIZE)) if hasattr(model, "uncounted_flops") else 0
+    flops = int(counter.get_total_flops()) + uncounted
 
     specification = {
         "parameters"            : sum(p.numel() for p in model.parameters()),
         "trainable_parameters"  : sum(p.numel() for p in model.parameters() if p.requires_grad),
         "macs"                  : flops // 2,
         "flops"                 : flops,
+        "uncounted_flops_added" : uncounted,
         **inference_speed(model, device, batch_size),
     }
     del model
@@ -252,7 +256,7 @@ def inference_speed(model, device, batch_size, warmup = None, repeats = None):
     def median_seconds(batch):
         x = torch.randn(batch, 3, config.IMAGE_SIZE, config.IMAGE_SIZE).to(device)
         timings = []
-        with torch.autocast(device_type = device.type, dtype = torch.float16, enabled = use_amp):
+        with torch.autocast(device_type = device.type, dtype = amp_dtype(), enabled = use_amp):
             for i in range(warmup + repeats):
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
@@ -267,7 +271,7 @@ def inference_speed(model, device, batch_size, warmup = None, repeats = None):
     latency = median_seconds(1)
     batch_time = median_seconds(int(batch_size))
     return {
-        "inference_precision"               : "fp16 AMP" if use_amp else "fp32",
+        "inference_precision"               : f"{config.AMP_DTYPE} AMP" if use_amp else "fp32",
         "inference_latency_ms_batch_1"      : latency * 1000,
         "inference_batch_size"              : int(batch_size),
         "inference_images_per_second"       : int(batch_size) / batch_time,

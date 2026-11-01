@@ -10,6 +10,7 @@ from utilities.data import create_dataloader
 from utilities.file import read_json, save_csv, save_json
 from utilities.log import print_test_summary, progress_bar, update_progress
 from utilities.metric import calculate_metrics, class_metrics_dataframe, with_probabilities
+from utilities.setting import amp_dtype
 from utilities.statistics import bootstrap_auroc_ci
 
 # ============================================================
@@ -28,8 +29,8 @@ def evaluate(device, number_of_classes, model, loader, criterion = None, epoch =
         images  = images.to(device, non_blocking = True)
         targets = targets.to(device, dtype = torch.float32, non_blocking = True)
 
-        # Forward ở FP16 (nếu bật AMP), loss tính ở FP32 như lúc huấn luyện
-        with torch.autocast(device_type = device.type, dtype = torch.float16, enabled = bool(config.USE_AMP and device.type == "cuda")):
+        # Forward ở AMP (AMP_DTYPE, nếu bật AMP), loss tính ở FP32 như lúc huấn luyện
+        with torch.autocast(device_type = device.type, dtype = amp_dtype(), enabled = bool(config.USE_AMP and device.type == "cuda")):
             logits = model(images)
 
         logits = logits.float()
