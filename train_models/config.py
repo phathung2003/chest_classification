@@ -17,6 +17,7 @@ NUMBER_OF_FOLDS             = 5                                                 
 TRAIN_ALL_FOLD              = False                                                                     # True: chạy đủ mọi fold (bắt buộc cho kết quả chính thức)
 SELECTED_FOLD               = [1]                                                                       # Fold chạy khi TRAIN_ALL_FOLD = False
 IMAGE_SIZE                  = 224                                                                       # Kích thước ảnh đầu vào (ảnh đã resize sẵn)
+IMAGE_VARIANT               = None                                                                      # Bộ ảnh: None = images_<IMAGE_SIZE>/ (images/ ở kích thước gốc); "aligned" = images_<IMAGE_SIZE>_aligned/ đã căn đường giữa (preprocess/align_midline.py)
 IMAGE_EXTENSION             = {".png", ".jpg", ".jpeg"}                                                 # Định dạng ảnh hợp lệ
 
 # ============================================================

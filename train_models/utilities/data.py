@@ -5,6 +5,7 @@ import random
 import numpy as np
 import pandas as pd
 import torch
+from PIL import Image
 from torch.utils.data import DataLoader, Dataset, Sampler
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
@@ -27,9 +28,27 @@ def load_dataset():
     train_df = pd.read_csv(config.TRAIN_FOLDS_DIRECTORY)
     test_df = pd.read_csv(config.TEST_DIRECTORY)
 
+    # image_path trỏ tới bộ ảnh của notebook tiền xử lý (images/, kích thước image_size trong dataset_info.json).
+    # IMAGE_SIZE khác hoặc có IMAGE_VARIANT: dùng thư mục image_directory() cùng tên tệp
+    directory = image_directory(dataset_config["image_size"])
+    if directory != "images":
+        for frame in (train_df, test_df):
+            frame["image_path"] = frame["image_path"].astype(str).str.replace(r"^images/", f"{directory}/", regex = True)
+
     validate_data(train_df, test_df, classes, number_of_folds)
     check_image_files(train_df, test_df)
     return train_df, test_df, name, classes, number_of_folds
+
+
+# ============================================================
+# Thư mục ảnh theo IMAGE_SIZE / IMAGE_VARIANT, tương đối theo DATASET_DIRECTORY:
+#   images/                           : bộ ảnh của notebook tiền xử lý (kích thước base_size)
+#   images_<IMAGE_SIZE>/              : preprocess/resize_images.py
+#   images_<IMAGE_SIZE>_<IMAGE_VARIANT>/ : ví dụ images_512_aligned/ của preprocess/align_midline.py
+def image_directory(base_size):
+    if config.IMAGE_VARIANT:
+        return f"images_{int(config.IMAGE_SIZE)}_{config.IMAGE_VARIANT}"
+    return "images" if int(config.IMAGE_SIZE) == int(base_size) else f"images_{int(config.IMAGE_SIZE)}"
 
 
 # ============================================================
@@ -47,7 +66,16 @@ def check_image_files(*frames):
     if missing:
         raise FileNotFoundError(f"Thiếu {len(missing):,} ảnh, ví dụ: {missing[0]}\n"
                                 f"image_path phải là đường dẫn tương đối theo {config.DATASET_DIRECTORY} (dạng images/x.png); "
-                                "dữ liệu có đường dẫn tuyệt đối của máy khác thì chạy lại notebook tiền xử lý")
+                                "dữ liệu có đường dẫn tuyệt đối của máy khác thì chạy lại notebook tiền xử lý; "
+                                + (f"IMAGE_VARIANT = '{config.IMAGE_VARIANT}' chưa có ảnh thì chạy python preprocess/align_midline.py {config.IMAGE_SIZE} --chexmask <ChestX-Ray8.csv>"
+                                   if config.IMAGE_VARIANT else
+                                   f"IMAGE_SIZE = {config.IMAGE_SIZE} chưa có ảnh thì chạy python preprocess/resize_images.py {config.IMAGE_SIZE}"))
+
+    # Ảnh được đọc nguyên kích thước (không resize khi huấn luyện): ảnh sai kích thước sẽ âm thầm đổi độ phân giải của thí nghiệm
+    for frame in frames:
+        with Image.open(config.DATASET_DIRECTORY / str(frame["image_path"].iloc[0])) as image:
+            if image.size != (config.IMAGE_SIZE, config.IMAGE_SIZE):
+                raise ValueError(f"Ảnh {frame['image_path'].iloc[0]} có kích thước {image.size}, khác IMAGE_SIZE = {config.IMAGE_SIZE}")
 
 
 # ============================================================
@@ -95,8 +123,10 @@ def validate_data(train_df, test_df, classes, number_of_folds):
 def transform_setting():
     normalize = transforms.Normalize(mean = config.TRANSFORM_NORMALIZE_MEAN, std = config.TRANSFORM_NORMALIZE_STD)
 
+    # FLIP_CHANCE = 0: không có bước lật ngang trong pipeline (giữ bất đối xứng giải phẫu trái / phải)
+    flip = [transforms.RandomHorizontalFlip(p = config.FLIP_CHANCE)] if config.FLIP_CHANCE > 0 else []
     train_transform = transforms.Compose([
-        transforms.RandomHorizontalFlip(p = config.FLIP_CHANCE),
+        *flip,
         transforms.RandomAffine(degrees = config.DEGREES, translate = config.TRANSLATE, scale = config.SCALE, fill = 0, interpolation = InterpolationMode.BILINEAR),
         transforms.ToTensor(),
         transforms.ColorJitter(brightness = config.BRIGHTNESS, contrast = config.CONTRAST),
