@@ -234,6 +234,8 @@ def upsample2x(x):
 #   3. Khối trộn token (Mamba-2 nhiều đường quét / Transformer / không trộn) + position embedding
 #   4. Logits = Class Query Head(token) + đường tắt GAP 1024 kênh (y hệt baseline DenseNet121); skip = False bỏ đường tắt
 class CNNSymMamba(nn.Module):
+    PRETRAINED_MODULES = ("stage3", "stage4")                      # Khối dùng trọng số ImageNet (nhóm LR backbone); còn lại là lớp mới
+
     def __init__(self, num_classes, mixer = "mamba", scan = "sym4", d_model = 256, n_layers = 2, d_state = 64, headdim = 64, dropout = 0.2, skip = True):
         super().__init__()
         if config.IMAGE_SIZE % 32:
