@@ -138,6 +138,33 @@ EXPERIMENT_PROTOCOL = {
 }
 
 # ============================================================
+# Giao thức CHUNG của nghiên cứu CLIS-Mamba (models/clis_mamba.py, models/run_clis.py) cho mọi mô hình được so sánh trong
+# nghiên cứu này: DenseNet121, ConvNeXt-T và các biến thể CLIS-Mamba. CLIS_CONFIG ghi đè các hằng số ở trên trước khi chạy
+# (utilities.setting.apply_config); CLIS_PROTOCOL thay cho EXPERIMENT_PROTOCOL. Giá trị thực tế vào chữ ký qua config / training_config.
+CLIS_CONFIG = {
+    "IMAGE_SIZE"            : 512,
+    "IMAGE_VARIANT"         : "aligned",            # Ảnh đã căn đường giữa cơ thể về giữa ảnh (mặt nạ phổi CheXmask)
+    "FLIP_CHANCE"           : 0.0,                  # Không lật ngang: giữ bất đối xứng giải phẫu trái / phải
+    "DEGREES"               : 7,
+    "TRANSLATE"             : (0.04, 0.04),
+    "SCALE"                 : (0.9, 1.1),
+    "EPOCHS"                : 20,
+    "PATIENCE"              : 4,
+    "BATCH_SIZE"            : 8,                    # Micro-batch
+    "GRAD_ACCUM_STEPS"      : 4,                    # Batch hiệu dụng 32
+    "GRAD_CLIP_NORM"        : 1.0,
+    "AMP_DTYPE"             : "bfloat16",
+    "ADAM_FUSED"            : False,                # torch 2.4 (env WSL có kernel mamba-ssm) chưa chạy được fused AdamW với gradient conv theo kênh dạng channels-last
+    "EVALUATE_FOLD_MODELS_ON_TEST": False,          # Khóa tập Test tới cổng G3 (đăng ký trước kế hoạch phân tích)
+}
+CLIS_PROTOCOL = {
+    "loss_config"           : {"name": "bce", "alpha": 0.0},                                         # BCE không pos_weight
+    "optimizer_config"      : {"name": "adamw", "lr": 1e-4, "weight_decay": 0.05, "new_module_lr_multiplier": 5.0, "no_weight_decay_1d": True},   # Backbone 1e-4, lớp mới 5e-4
+    "scheduler_config"      : {"name": "warmup_cosine", "warmup_epochs": 1},
+    "selection_metric"      : "macro_auroc",
+}
+
+# ============================================================
 # Hiển thị console. Cấu trúc dòng: [RESULT] TITLE: MESSAGE
 MIN_RESULT_WIDTH            = 10
 MIN_TITLE_WIDTH             = 30
