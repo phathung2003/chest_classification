@@ -21,6 +21,7 @@ from sklearn.model_selection import GroupShuffleSplit
 
 import config
 from training.calibration import apply_temperature, fit_temperatures
+from utilities.file import atomic_write, save_csv
 from utilities.metric import calculate_metrics, class_metrics_dataframe
 
 PROBABILITY_PREFIX  = "prob_"                                               # Tiền tố cột xác suất trong tệp OOF: prob_<lớp>
@@ -267,11 +268,12 @@ def fit_postprocessing(oof_path, output_dir, *, calibration = None, beta = None,
         "warning"           : "Điểm F-beta trên OOF là lạc quan. Không bao giờ chọn ngưỡng trên Test.",
     }
 
-    # Lưu kết quả
+    # Lưu kết quả (ghi an toàn)
+    ## postprocess.json ghi sau cùng: Có tệp này nghĩa là hậu xử lý đã lưu đủ, lần chạy tiếp sẽ bỏ qua bước này
     output_dir = Path(output_dir)
     output_dir.mkdir(parents = True, exist_ok = True)
-    (output_dir / "postprocess.json").write_text(json.dumps(result, indent = 2, ensure_ascii = False) + "\n", encoding = "utf-8")
-    report.to_csv(output_dir / "oof_postprocess_report.csv", index = False)
+    save_csv(output_dir / "oof_postprocess_report.csv", report)
+    atomic_write(output_dir / "postprocess.json", lambda temporary: temporary.write_text(json.dumps(result, indent = 2, ensure_ascii = False) + "\n", encoding = "utf-8"))
 
     return result, report
 
@@ -489,11 +491,12 @@ def fit_fold_thresholds(oof_path, output_dir, *, expected_classes = None, calibr
     }
 
     # Lưu kết quả
+    ## postprocess.json ghi sau cùng: Có tệp này nghĩa là mọi kết quả chọn ngưỡng của Fold đã lưu đủ, lần chạy tiếp sẽ bỏ qua bước này
     output_dir = Path(output_dir)
     output_dir.mkdir(parents = True, exist_ok = True)
-    (output_dir / "postprocess.json").write_text(json.dumps(postprocess, ensure_ascii = False, indent = 2) + "\n", encoding = "utf-8")
-    (output_dir / "fold_threshold_summary.json").write_text(json.dumps(summary, ensure_ascii = False, indent = 2) + "\n", encoding = "utf-8")
-    report.to_csv(output_dir / "fold_threshold_report.csv", index = False)
+    atomic_write(output_dir / "fold_threshold_summary.json", lambda temporary: temporary.write_text(json.dumps(summary, ensure_ascii = False, indent = 2) + "\n", encoding = "utf-8"))
+    save_csv(output_dir / "fold_threshold_report.csv", report)
+    atomic_write(output_dir / "postprocess.json", lambda temporary: temporary.write_text(json.dumps(postprocess, ensure_ascii = False, indent = 2) + "\n", encoding = "utf-8"))
 
     # In kết quả
     print("\n[CHỌN NGƯỠNG TỰ ĐỘNG]")
