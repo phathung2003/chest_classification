@@ -1,0 +1,2 @@
+# Tệp văn bản lưu trong git với LF; khi checkout, Windows / Linux tự đổi sang ký tự xuống dòng của hệ điều hành
+* text=auto
