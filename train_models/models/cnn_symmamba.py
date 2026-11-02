@@ -38,7 +38,7 @@ from utilities.dataset import NIHChestXrayDataset
 
 # ============================================================
 # Cài đặt mô hình
-MODEL_NAME      = "CNN SymMamba v1"                    # Tên mô hình
+MODEL_NAME      = "CNN SymMamba_v1.1"                  # Tên mô hình
 
 
 # ============================================================
