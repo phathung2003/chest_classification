@@ -1,4 +1,11 @@
-import re
+# ============================================================
+# Mô hình: CheXNet (Rajpurkar et al., 2017)
+# Mục tiêu: Tái hiện mô hình CheXNet theo bài báo
+# Kiến trúc: Ảnh 224 x 224 --> DenseNet-121 đầy đủ (features + GAP + classifier mới) --> logits [B, 14].
+# ============================================================
+
+# Khai báo utilities
+import os
 import sys
 from pathlib import Path
 
@@ -6,63 +13,51 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-import torch
-import torch.nn as nn
-from torchvision.models import DenseNet121_Weights, densenet121
+# Chế độ tất định của cuBLAS
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
-from training.experiment import run_experiment
+# Khai báo thư viện
+import torch.nn as nn
+from torchvision.models import densenet121, DenseNet121_Weights
+from training.experiment import start_train
 from utilities.dataset import NIHChestXrayDataset
 
+# ============================================================
+# Cài đặt mô hình
+MODEL_NAME = "CheXNet_Paper_14_v2"                                          # Tên mô hình
+
+# ============================================================
+# Mô hình
 class CheXNet(nn.Module):
-    def __init__(self, num_classes = 14, weights = "imagenet", checkpoint_path = None):
+
+    # Khởi tạo mô hình
+    def __init__(self, num_classes):
         super().__init__()
-        if num_classes != 14:
-            raise ValueError("Checkpoint/kiến trúc này dùng 14 bệnh của NIH ChestXray14.")
-        if weights not in ("imagenet", "chexnet", "random"):
-            raise ValueError("weights phải là 'imagenet', 'chexnet' hoặc 'random'.")
+        self.cnn = densenet121(weights = DenseNet121_Weights.IMAGENET1K_V1)                       # DenseNet-121 đầy đủ (features + GAP + classifier)
+        self.cnn.classifier = nn.Linear(self.cnn.classifier.in_features, num_classes)             # Thay classifier 1000 lớp bằng num_classes lớp
 
-        imagenet_weights = (DenseNet121_Weights.IMAGENET1K_V1
-                            if weights == "imagenet" else None)
-        self.densenet121 = densenet121(weights = imagenet_weights)
-        in_features = self.densenet121.classifier.in_features
-        self.densenet121.classifier = nn.Linear(in_features, num_classes)
-
-        if weights == "chexnet":
-            if checkpoint_path is None:
-                raise ValueError("weights='chexnet' yêu cầu checkpoint_path.")
-            load_original_chexnet_weights(self.densenet121, checkpoint_path)
-        elif checkpoint_path is not None:
-            raise ValueError("checkpoint_path chỉ dùng khi weights='chexnet'.")
-
+    # Lan truyền xuôi (Forward)
+    # Trả về: logits [batch_size, num_classes]
     def forward(self, x):
-        # Batch ảnh đơn: [B,3,H,W] -> logits [B,14].
-        if x.ndim == 4:
-            return self.densenet121(x)
 
-        # Dành cho ten-crop inference: [B,10,3,224,224].
-        # Trung bình XÁC SUẤT trên 10 crop như bản code CheXNet gốc;
-        # đổi ngược về logits để không bị sigmoid lần thứ hai.
-        if x.ndim == 5:
-            if x.shape[1] != 10:
-                raise ValueError("Dữ liệu nhiều crop phải có đúng 10 crops.")
-            summed_prob = None
-            for crop_id in range(x.shape[1]):
-                logits = self.densenet121(x[:, crop_id])
-                prob = torch.sigmoid(logits.float())
-                summed_prob = prob if summed_prob is None else summed_prob + prob
-            mean_prob = summed_prob / x.shape[1]
-            return torch.logit(mean_prob.clamp(1e-6, 1.0 - 1e-6))
+        # Kiểm tra dữ liệu đầu vào
+        ## Ảnh đầu vào phải có dạng [batch_size, 3, H, W]
+        if x.ndim != 4 or x.size(1) != 3:
+            raise ValueError(
+                "[CheXNet]: Ảnh đầu vào phải có dạng [batch_size, 3, H, W].\n"
+                f"Nhận được: x = {tuple(x.shape)}"
+            )
 
-        raise ValueError(f"Input phải có 4 hoặc 5 chiều; nhận {tuple(x.shape)}.")
+        return self.cnn(x)  # logits: [batch, num_classes]
 
-
-MODEL_NAME = "CheXNet DenseNet121 Baseline_v1"
-LOSS_CONFIG = {"name": "chexnet_bce"}
+# ============================================================
+# Cấu hình huấn luyện
+LOSS_CONFIG = {"name": "chexnet_bce"}                                       # BCE: Tổng theo lớp, trung bình theo batch
 
 SCHEDULER_CONFIG = {
     "name": "reduce_on_plateau",
-    "mode": "min",
-    "factor": 0.1,
+    "mode": "min",                                                          # Theo dõi validation loss
+    "factor": 0.1,                                                          # Giảm learning rate 10 lần
 }
 
 OPTIMIZER_CONFIG = {
@@ -72,8 +67,10 @@ OPTIMIZER_CONFIG = {
 
 SELECTION_METRIC = "validation_loss"
 
+# ============================================================
+# Chạy huấn luyện
 if __name__ == "__main__":
-    run_experiment(
+    start_train(
         model_name = MODEL_NAME,
         dataset_class = NIHChestXrayDataset,
         model_factory = CheXNet,

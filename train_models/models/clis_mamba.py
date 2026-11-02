@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 import config
-from training.experiment import run_experiment
+from training.experiment import start_train
 from utilities.dataset import NIHChestXrayDataset
 from utilities.file import load_torch
 
@@ -432,4 +432,4 @@ if __name__ == "__main__":
 
     apply_config(config.CLIS_CONFIG)
     for name in names:
-        run_experiment(model_name = model_name(name), dataset_class = NIHChestXrayDataset, model_factory = CLISMamba, model_kwargs = VARIANTS[name], **config.CLIS_PROTOCOL)
+        start_train(model_name = model_name(name), dataset_class = NIHChestXrayDataset, model_factory = CLISMamba, model_kwargs = VARIANTS[name], **config.CLIS_PROTOCOL)

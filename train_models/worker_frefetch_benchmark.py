@@ -1,3 +1,14 @@
+# ============================================================
+# Đo tốc độ DataLoader (DataLoader Benchmark)
+# Mục tiêu: Tìm số worker (NUMBER_OF_WORKERS) và số batch tải trước (PREFETCH_FACTOR) cho DataLoader nhanh nhất trên máy hiện tại, bằng cách đo thời gian đọc batch của tập huấn luyện thật với các tổ hợp (worker, prefetch).
+# ** Chỉ đo tốc độ đọc dữ liệu, không phải tốc độ huấn luyện đầy đủ của mô hình.
+
+# Quy trình (ví dụ máy 8 CPU logic, prefetch thử [2, 4]):
+# - Tổ hợp: (0, None), (1, 2), (1, 4), ..., (8, 2), (8, 4); mỗi tổ hợp chạy --repeats lần, lấy trung vị.
+# - Khuyến nghị: Tổ hợp ít worker nhất trong phạm vi --tolerance (mặc định 5%) so với tổ hợp nhanh nhất.
+# ============================================================
+
+# Chế độ tất định của cuBLAS: Phải đặt trước khi CUDA khởi tạo
 import os
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
@@ -17,18 +28,24 @@ import config
 from utilities.data import _seed_worker, transform_setting
 from utilities.dataset import NIHChestXrayDataset
 
-
+# ============================================================
+# Số CPU logic tiến trình được phép dùng (ước lượng thận trọng)
+# - os.sched_getaffinity() (Linux) và psutil (nếu có cài) cho biết số CPU thực sự được gán cho tiến trình.
+# - Windows Python 3.10 không có os.sched_getaffinity(); psutil là tùy chọn.
+# Trả về: Số CPU (ít nhất 1)
 def detected_worker_limit():
-    """Conservative best-effort count of logical CPUs available to this process."""
+
+    # Số CPU logic của máy
     count = os.cpu_count() or 1
 
+    # Linux: Số CPU được gán cho tiến trình
     if hasattr(os, "sched_getaffinity"):
         try:
             count = min(count, len(os.sched_getaffinity(0)))
         except (OSError, ValueError):
             pass
 
-    # Windows Python 3.10 has no os.sched_getaffinity(). psutil is optional.
+    # psutil (nếu có): Số CPU được gán cho tiến trình trên mọi hệ điều hành
     try:
         import psutil
         affinity = psutil.Process().cpu_affinity()
@@ -39,9 +56,14 @@ def detected_worker_limit():
 
     return max(1, int(count))
 
-
+# ============================================================
+# Tạo DataLoader chỉ để đo tốc độ đọc dữ liệu
+# - Huấn luyện thật dùng persistent workers (khởi động worker một lần mỗi Fold) và EpochSampler.
+# - Ở đây mỗi lần thử tạo worker mới (persistent_workers = False) để mọi lần thử đều tính cả thời gian khởi động.
+# Trả về: DataLoader
 def create_loader(dataset, device, workers, prefetch_factor, seed):
-    """Loader throughput only: training uses persistent workers (startup paid once per fold) and EpochSampler."""
+
+    # Bộ sinh ngẫu nhiên của DataLoader (cùng seed --> cùng thứ tự lấy mẫu)
     generator = torch.Generator()
     generator.manual_seed(int(seed))
 
@@ -55,31 +77,46 @@ def create_loader(dataset, device, workers, prefetch_factor, seed):
         drop_last = False,
         worker_init_fn = _seed_worker,
         generator = generator,
-        persistent_workers = False,  # Fresh workers per trial so every trial includes startup time.
+        persistent_workers = False,  # Worker mới cho mỗi lần thử, để mọi lần thử đều tính thời gian khởi động
         timeout = 120 if workers > 0 else 0,
     )
 
-
+# ============================================================
+# Đo một lần thử: Đọc `batches` batch đầu tiên (kèm chép lên GPU nếu có), tách thời gian batch đầu (khởi động worker)
+# Trả về: dict số batch đã đo, thời gian batch đầu, thời gian trung bình mỗi batch sau đó, tổng thời gian, ước lượng một epoch
 def measure_one(dataset, device, workers, prefetch_factor, batches, seed):
-    # All configurations use the same random seed and sampling order.
+
+    # Mọi tổ hợp dùng cùng seed và cùng thứ tự lấy mẫu
     random.seed(seed)
     np.random.seed(seed % (2**32))
     torch.manual_seed(seed)
 
+    # Tạo DataLoader và chọn số batch đo
     loader = create_loader(dataset, device, workers, prefetch_factor, seed)
     total_batches = len(loader)
     n = min(int(batches), total_batches)
-    if n < 2:
-        raise ValueError("Need >= 2 batches for measurement.")
 
+    # Kiểm tra dữ liệu đầu vào
+    ## Cần ít nhất 2 batch (tách batch đầu khỏi các batch sau)
+    if n < 2:
+        raise ValueError(
+            "[measure_one]: Cần ít nhất 2 batch để đo.\n"
+            f"Nhận được: Số batch = {n}"
+        )
+
+    # Khởi tạo biến
     iterator = None
     first_seconds = None
+
     try:
+
+        # Bắt đầu đo (đồng bộ GPU trước khi bấm giờ)
         if device.type == "cuda":
             torch.cuda.synchronize()
         start = time.perf_counter()
         iterator = iter(loader)
 
+        # Đọc từng batch (chép lên GPU như lúc huấn luyện), ghi thời gian batch đầu
         for idx in range(n):
             images, targets = next(iterator)
             if device.type == "cuda":
@@ -91,17 +128,21 @@ def measure_one(dataset, device, workers, prefetch_factor, batches, seed):
             if idx == 0:
                 first_seconds = time.perf_counter() - start
 
+        # Kết thúc đo (đồng bộ GPU trước khi bấm giờ)
         if device.type == "cuda":
             torch.cuda.synchronize()
         elapsed = time.perf_counter() - start
+
+    # Dừng sớm giữa epoch nên phải đóng các worker đã spawn
     finally:
-        # Iteration stops early, so close spawned workers explicitly.
         del iterator
         del loader
         gc.collect()
 
+    # Thời gian mỗi batch ở trạng thái ổn định và ước lượng thời gian một epoch
     steady_sec = max(0.0, (elapsed - first_seconds) / (n - 1))
     epoch_estimate = first_seconds + (total_batches - 1) * steady_sec
+
     return {
         "batches_measured": n,
         "first_batch_sec": first_seconds,
@@ -111,46 +152,90 @@ def measure_one(dataset, device, workers, prefetch_factor, batches, seed):
         "estimated_epoch_sec": epoch_estimate,
     }
 
-
+# ============================================================
+# Hiển thị prefetch_factor (0 worker không có prefetch --> "None")
+# Trả về: Chuỗi hiển thị
 def _display_prefetch(value):
     return "None" if pd.isna(value) else str(int(value))
 
-
+# ============================================================
+# Chạy toàn bộ phép đo: Mọi tổ hợp (worker, prefetch) x số lần lặp, lưu kết quả thô và bảng tổng hợp, in khuyến nghị
+# Trả về: Bảng tổng hợp (trung vị theo tổ hợp, sắp xếp theo thời gian ước lượng một epoch)
 def benchmark(args):
-    if args.fold < 1 or args.batches < 2 or args.repeats < 1:
-        raise ValueError("fold >= 1, batches >= 2 and repeats >= 1 required")
-    if not 0 <= args.tolerance < 1:
-        raise ValueError("tolerance must be between 0 and 1")
-    if not args.prefetch or any(x < 1 for x in args.prefetch):
-        raise ValueError("prefetch values must be positive integers")
 
+    # 1. Kiểm tra dữ liệu đầu vào
+    ## Fold >= 1, batches >= 2, repeats >= 1
+    if args.fold < 1 or args.batches < 2 or args.repeats < 1:
+        raise ValueError(
+            "[benchmark]: Cần Fold >= 1, batches >= 2 và repeats >= 1.\n"
+            f"Nhận được: Fold = {args.fold}, batches = {args.batches}, repeats = {args.repeats}"
+        )
+
+    ## tolerance nằm trong khoảng [0, 1)
+    if not 0 <= args.tolerance < 1:
+        raise ValueError(
+            "[benchmark]: tolerance phải nằm trong khoảng [0, 1).\n"
+            f"Nhận được: tolerance = {args.tolerance}"
+        )
+
+    ## prefetch là các số nguyên dương
+    if not args.prefetch or any(value < 1 for value in args.prefetch):
+        raise ValueError(
+            "[benchmark]: prefetch phải là các số nguyên dương.\n"
+            f"Nhận được: prefetch = {args.prefetch}"
+        )
+
+    ## max-workers không âm
     system_limit = detected_worker_limit()
     if args.max_workers is not None and args.max_workers < 0:
-        raise ValueError("max-workers must be >= 0")
+        raise ValueError(
+            "[benchmark]: max-workers phải lớn hơn hoặc bằng 0.\n"
+            f"Nhận được: max-workers = {args.max_workers}"
+        )
+
+    # 2. Các tổ hợp cần đo: (0 worker, không prefetch) + mọi (worker, prefetch)
     max_workers = min(system_limit, args.max_workers) if args.max_workers is not None else system_limit
-    prefetch_values = sorted(set(int(p) for p in args.prefetch))
+    prefetch_values = sorted(set(int(value) for value in args.prefetch))
     combinations = [(0, None)] + [
         (w, p)
         for w in range(1, max_workers + 1)
         for p in prefetch_values
     ]
 
+    # 3. Đọc tập dữ liệu
     with Path(config.DATASET_INFO_DIRECTORY).open("r", encoding = "utf-8") as f:
         info = json.load(f)
     classes = list(info["classes"])
     df = pd.read_csv(config.TRAIN_FOLDS_DIRECTORY)
+
+    ## train_folds.csv phải có đủ cột
     missing = {"image_path", "Fold", *classes} - set(df.columns)
     if missing:
-        raise ValueError(f"Missing columns in train_folds.csv: {sorted(missing)}")
+        raise ValueError(
+            "[benchmark]: train_folds.csv thiếu cột bắt buộc.\n"
+            f"Thiếu cột: {sorted(missing)}"
+        )
+
+    ## Fold phải có trong train_folds.csv
     if not df["Fold"].eq(args.fold).any():
-        raise ValueError(f"Fold {args.fold} not found in train_folds.csv")
+        raise ValueError(
+            f"[benchmark]: Không tìm thấy Fold {args.fold} trong train_folds.csv.\n"
+            f"Nhận được: Các Fold = {sorted(int(fold) for fold in df['Fold'].unique())}"
+        )
 
+    ## Tập huấn luyện của Fold (bỏ Fold Validation)
     train_df = df.loc[df["Fold"].ne(args.fold)].reset_index(drop = True)
-    if train_df.empty:
-        raise ValueError("No training samples after removing validation fold")
 
-    # Training path: train_one_fold() uses these transforms and dataset class.
-    # Seed as in utilities.setting.set_seed(), without importing optional logging tools.
+    ## Tập huấn luyện của Fold không được rỗng
+    if train_df.empty:
+        raise ValueError(
+            "[benchmark]: Không còn ảnh huấn luyện sau khi bỏ Fold Validation.\n"
+            f"Nhận được: Fold = {args.fold}"
+        )
+
+    # 4. Chuẩn bị môi trường đo
+    ## Cùng đường đi dữ liệu như train_one_fold(): Cùng biến đổi ảnh và lớp Dataset
+    ## Đặt seed như utilities.setting.set_seed(), không import các công cụ ghi log không cần thiết
     random.seed(int(config.SEED))
     np.random.seed(int(config.SEED))
     torch.manual_seed(int(config.SEED))
@@ -162,39 +247,47 @@ def benchmark(args):
     transform, _ = transform_setting()
     dataset = NIHChestXrayDataset(dataframe = train_df, classes = classes,
                                  transform = transform)
+
+    ## Khởi tạo CUDA trước khi đo (không tính thời gian khởi tạo vào lần thử đầu)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
         torch.empty(1, device = device)
         torch.cuda.synchronize()
 
+    ## Đường dẫn tệp kết quả (tương đối theo thư mục của script)
     root = Path(__file__).resolve().parent
     raw_path = root / args.csv
     summary_path = root / args.summary_csv
     raw_path.parent.mkdir(parents = True, exist_ok = True)
     summary_path.parent.mkdir(parents = True, exist_ok = True)
 
-    print(f"Device               : {torch.cuda.get_device_name(0) if device.type == 'cuda' else 'CPU'}")
-    print(f"Logical CPUs reported: {os.cpu_count()}")
-    print(f"Detected CPU limit   : {system_limit}")
-    print(f"Workers              : 0..{max_workers}")
-    print(f"Prefetch (workers>0) : {prefetch_values}")
-    print(f"Configurations       : {len(combinations)}")
-    print(f"Total trials         : {len(combinations) * args.repeats}")
-    print(f"Fold / samples       : {args.fold} / {len(dataset):,}")
-    print(f"Batch size           : {config.BATCH_SIZE}")
-    print(f"Batches per trial    : {min(args.batches, (len(dataset) + config.BATCH_SIZE - 1) // config.BATCH_SIZE)}")
-    print(f"Repeats              : {args.repeats}\n", flush = True)
+    ## In cấu hình phép đo
+    print(f"Thiết bị                  : {torch.cuda.get_device_name(0) if device.type == 'cuda' else 'CPU'}")
+    print(f"Số CPU logic (hệ điều hành): {os.cpu_count()}")
+    print(f"Số CPU được dùng          : {system_limit}")
+    print(f"Số worker                 : 0..{max_workers}")
+    print(f"Prefetch (worker > 0)     : {prefetch_values}")
+    print(f"Số tổ hợp                 : {len(combinations)}")
+    print(f"Tổng số lần thử           : {len(combinations) * args.repeats}")
+    print(f"Fold / số ảnh             : {args.fold} / {len(dataset):,}")
+    print(f"Batch size                : {config.BATCH_SIZE}")
+    print(f"Số batch mỗi lần thử      : {min(args.batches, (len(dataset) + config.BATCH_SIZE - 1) // config.BATCH_SIZE)}")
+    print(f"Số lần lặp                : {args.repeats}\n", flush = True)
 
+    # 5. Đo mọi tổ hợp
     rows = []
     base_seed = int(config.SEED) + args.fold * 100_000 + 1
 
     try:
         for trial in range(1, args.repeats + 1):
-            # Reverse every second pass to reduce disk-cache/order bias.
+
+            ## Đảo thứ tự tổ hợp ở mỗi lượt chẵn để giảm thiên lệch do bộ đệm đĩa / thứ tự chạy
             order = combinations if trial % 2 else list(reversed(combinations))
             for idx, (workers, prefetch) in enumerate(order, start = 1):
-                print(f"[Trial {trial}/{args.repeats} | {idx}/{len(order)}] "
+                print(f"[Lượt {trial}/{args.repeats} | {idx}/{len(order)}] "
                       f"workers={workers}, prefetch={prefetch}", flush = True)
+
+                ### Kết quả của lần thử
                 record = {
                     "trial": trial,
                     "workers": workers,
@@ -202,33 +295,45 @@ def benchmark(args):
                     "status": "ok",
                     "error": "",
                 }
+
+                ### Đo (lỗi --> ghi lại lỗi, chuyển sang tổ hợp kế tiếp)
                 try:
                     record.update(measure_one(
                         dataset, device, workers, prefetch,
                         args.batches, base_seed,
                     ))
                     print(f"    {record['total_sec']:.2f}s | "
-                          f"{record['batches_per_sec']:.2f} batches/s | "
-                          f"epoch estimate={record['estimated_epoch_sec']:.1f}s", flush = True)
+                          f"{record['batches_per_sec']:.2f} batch/s | "
+                          f"ước lượng epoch = {record['estimated_epoch_sec']:.1f}s", flush = True)
                 except (OSError, RuntimeError, ValueError, MemoryError) as exc:
                     record.update(status = "error", error = f"{type(exc).__name__}: {exc}")
-                    print(f"    FAILED: {record['error']}", flush = True)
-                    # Free allocator cache after a failed CUDA transfer.
+                    print(f"    LỖI: {record['error']}", flush = True)
+
+                    # Giải phóng bộ nhớ đệm của GPU sau một lần chép lên GPU bị lỗi
                     if device.type == "cuda":
                         torch.cuda.empty_cache()
+
+                ### Lưu kết quả sau mỗi lần thử: Bị ngắt giữa chừng vẫn giữ các lần thử trước đó
                 rows.append(record)
-                # Save incremental results; interruptions need not lose prior trials.
                 pd.DataFrame(rows).to_csv(raw_path, index = False)
+
+    ## Ctrl+C: Giữ kết quả một phần đã lưu
     except KeyboardInterrupt:
-        print(f"\nInterrupted. Partial results saved: {raw_path}")
+        print(f"\nĐã dừng. Kết quả một phần đã lưu: {raw_path}")
         raise
 
+    # 6. Bảng tổng hợp: Trung vị theo tổ hợp (chỉ các lần thử thành công)
     raw = pd.DataFrame(rows)
     passed = raw[raw["status"] == "ok"].copy()
-    if passed.empty:
-        raise RuntimeError(f"All configurations failed. Inspect {raw_path}")
 
-    # dropna = False retains workers = 0 / prefetch_factor = None.
+    ## Phải có ít nhất một lần thử thành công
+    if passed.empty:
+        raise RuntimeError(
+            "[benchmark]: Mọi tổ hợp đều lỗi.\n"
+            f"Xem chi tiết: {raw_path}"
+        )
+
+    ## dropna = False: Giữ tổ hợp workers = 0 / prefetch_factor = None
     summary = passed.groupby(
         ["workers", "prefetch_factor"], dropna = False, as_index = False,
     ).agg(
@@ -240,33 +345,40 @@ def benchmark(args):
     ).sort_values("median_epoch_sec", ascending = True)
     summary.to_csv(summary_path, index = False)
 
-    print("\n--- RESULTS (smallest median_epoch_sec wins) ---")
+    ## In bảng tổng hợp
+    print("\n--- KẾT QUẢ (median_epoch_sec nhỏ nhất là nhanh nhất) ---")
     print(summary.to_string(index = False, float_format = lambda x: f"{x:.2f}"))
 
+    # 7. Khuyến nghị: Trong các tổ hợp chạy đủ mọi lần lặp, chọn tổ hợp ít worker nhất trong phạm vi tolerance so với nhanh nhất
     complete = summary[summary["successful_runs"] == args.repeats]
     if complete.empty:
-        print("\nNo configuration completed all repeats; no recommendation.")
+        print("\nKhông có tổ hợp nào chạy đủ mọi lần lặp; không đưa ra khuyến nghị.")
     else:
         fastest = float(complete["median_epoch_sec"].min())
         near_best = complete[
             complete["median_epoch_sec"] <= fastest * (1 + args.tolerance)
         ].sort_values(["workers", "prefetch_factor"], na_position = "first")
         choice = near_best.iloc[0]
-        print(f"\nRECOMMENDED num_workers      : {int(choice['workers'])}")
-        print(f"RECOMMENDED prefetch_factor  : {_display_prefetch(choice['prefetch_factor'])}")
-        print(f"Within {args.tolerance:.0%} of fastest tested epoch estimate.")
+        print(f"\nKHUYẾN NGHỊ NUMBER_OF_WORKERS : {int(choice['workers'])}")
+        print(f"KHUYẾN NGHỊ PREFETCH_FACTOR   : {_display_prefetch(choice['prefetch_factor'])}")
+        print(f"Trong phạm vi {args.tolerance:.0%} so với ước lượng epoch nhanh nhất.")
 
-    print(f"\nRaw CSV      : {raw_path}")
-    print(f"Summary CSV  : {summary_path}")
-    print("Loader-only estimate, not a full model training benchmark.")
-    print("To use prefetch other than 2 during training, update utilities/data.py.")
+    # In đường dẫn kết quả và lưu ý
+    print(f"\nKết quả thô  : {raw_path}")
+    print(f"Bảng tổng hợp: {summary_path}")
+    print("Chỉ ước lượng tốc độ đọc dữ liệu, không phải tốc độ huấn luyện đầy đủ của mô hình.")
+    print("Áp dụng khuyến nghị: Đổi NUMBER_OF_WORKERS / PREFETCH_FACTOR trong config.py.")
     return summary
 
-
+# ============================================================
+# Dòng lệnh: Đọc tham số và chạy phép đo
+# Trả về: Bảng tổng hợp của benchmark
 def main():
-    parser = argparse.ArgumentParser(description = __doc__)
+
+    # Đọc tham số dòng lệnh
+    parser = argparse.ArgumentParser(description = "Đo tốc độ DataLoader theo số worker / prefetch")
     parser.add_argument("--max-workers", type = int, default = None,
-                        help = "Optional cap. Default: all detected logical CPUs.")
+                        help = "Số worker tối đa cần thử. Mặc định: mọi CPU logic được dùng.")
     parser.add_argument("--prefetch", type = int, nargs = "+", default = [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
     parser.add_argument("--batches", type = int, default = 200)
     parser.add_argument("--repeats", type = int, default = 5)
@@ -274,10 +386,13 @@ def main():
     parser.add_argument("--tolerance", type = float, default = 0.05)
     parser.add_argument("--csv", type = str, default = "worker_benchmark_raw.csv")
     parser.add_argument("--summary-csv", type = str, default = "worker_benchmark_summary.csv")
+
+    # Chạy phép đo
     return benchmark(parser.parse_args())
 
-
 if __name__ == "__main__":
+
+    # Cần cho multiprocessing khi đóng gói thành tệp chạy (.exe) trên Windows
     from multiprocessing import freeze_support
     freeze_support()
     main()

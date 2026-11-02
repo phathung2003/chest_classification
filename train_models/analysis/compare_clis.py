@@ -102,7 +102,7 @@ def p_values(samples):
 # ============================================================
 # Bootstrap ghép cặp theo bệnh nhân: cùng mẫu bệnh nhân cho cả hai cấu hình. Nhãn không có ca dương / âm trong một mẫu bootstrap
 # (thường là Hernia) bị bỏ khỏi trung bình của mẫu đó; số lần bỏ được đếm và báo cáo
-def paired_group_bootstrap(targets, probabilities_a, probabilities_b, patients, classes, *, n_boot, seed, alpha):
+def paired_group_bootstrap(targets, probabilities_a, probabilities_b, patients, classes, *, bootstrap_iteration, seed, alpha):
     index = {name: [classes.index(c) for c in members] for name, members in GROUPS.items()}
     point_a, point_b = auroc_per_class(targets, probabilities_a), auroc_per_class(targets, probabilities_b)
 
@@ -116,7 +116,7 @@ def paired_group_bootstrap(targets, probabilities_a, probabilities_b, patients, 
     point = summaries(point_a, point_b)
     samples = {key: [] for key in point}
     per_class, dropped = [], np.zeros(len(classes), dtype = int)
-    for rows in _bootstrap_samples(patients, n_boot, seed):
+    for rows in _bootstrap_samples(patients, bootstrap_iteration, seed):
         a, b = auroc_per_class(targets[rows], probabilities_a[rows]), auroc_per_class(targets[rows], probabilities_b[rows])
         dropped += ~np.isfinite(a)
         per_class.append(a - b)
@@ -149,7 +149,7 @@ def main():
     parser.add_argument("--b", nargs = "+", type = Path, required = True, help = "Tệp dự đoán của cấu hình B (mỗi seed một tệp)")
     parser.add_argument("--name-a", default = "A")
     parser.add_argument("--name-b", default = "B")
-    parser.add_argument("--n-boot", type = int, default = int(config.COMPARE_BOOTSTRAP_ITERATIONS))
+    parser.add_argument("--n-boot", type = int, default = int(config.COMPARE_BOOTSTRAP_ITERATION))
     parser.add_argument("--seed", type = int, default = 0, help = "Seed của bootstrap (đăng ký trước: 0)")
     parser.add_argument("--patient-column", default = config.PATIENT_ID_COLUMN)
     parser.add_argument("--key-column", default = config.IMAGE_ID_COLUMN)
@@ -181,7 +181,7 @@ def main():
     targets = frame_a[classes].to_numpy(dtype = np.float64)
     patients = frame_a[args.patient_column].to_numpy()
     probabilities_a, probabilities_b = seeds_a.mean(axis = 0), seeds_b.mean(axis = 0)
-    comparison, class_rows = paired_group_bootstrap(targets, probabilities_a, probabilities_b, patients, classes, n_boot = args.n_boot, seed = args.seed, alpha = alpha)
+    comparison, class_rows = paired_group_bootstrap(targets, probabilities_a, probabilities_b, patients, classes, bootstrap_iteration = args.n_boot, seed = args.seed, alpha = alpha)
 
     # Mỗi cấu hình: macro AUROC từng seed (mean ± SD: biến thiên do huấn luyện) và chỉ số của xác suất trung bình qua seed
     configurations = {}
@@ -199,7 +199,7 @@ def main():
             "classes": rows,
         }
 
-    result = {"method": "patient-level paired percentile bootstrap on seed-averaged probabilities", "n_boot": args.n_boot, "seed": args.seed,
+    result = {"method": "patient-level paired percentile bootstrap on seed-averaged probabilities", "bootstrap_iteration": args.n_boot, "seed": args.seed,
               "confidence": 1 - alpha, "images": len(targets), "patients": int(pd.Series(patients).nunique()), "groups": GROUPS,
               "practical_delta": PRACTICAL_DELTA, "model_a": args.name_a, "model_b": args.name_b,
               "comparison": comparison, "classes": class_rows, "configurations": configurations}

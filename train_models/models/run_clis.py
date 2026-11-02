@@ -20,7 +20,7 @@ import config
 import models.clis_mamba as clis
 import models.convnext_tiny as convnext
 import models.densenet121 as densenet
-from training.experiment import run_experiment
+from training.experiment import start_train
 from utilities.dataset import NIHChestXrayDataset
 from utilities.file import read_json, to_snake_case
 from utilities.log import timestamp
@@ -77,7 +77,7 @@ def run_child(name, seed, fold, lr_multiplier, overrides, lr = None, init_from_s
     if lr_multiplier is not None:
         protocol["optimizer_config"]["new_module_lr_multiplier"] = float(lr_multiplier)
     if lr is not None:
-        protocol["optimizer_config"]["lr"] = float(lr)
+        protocol["optimizer_config"]["learning_rate"] = float(lr)
     if name in BASELINES:
         if init_from_size is not None:
             raise SystemExit("--init-from-size chỉ dùng cho các biến thể CLIS-Mamba")
@@ -88,7 +88,7 @@ def run_child(name, seed, fold, lr_multiplier, overrides, lr = None, init_from_s
         if init_from_size is not None:
             kwargs["init_from"] = str(find_checkpoint(name, seed, fold, init_from_size))
             print(f"Khởi tạo từ {kwargs['init_from']}")
-    run_experiment(model_name = model_name, dataset_class = NIHChestXrayDataset, model_factory = factory, model_kwargs = kwargs, **protocol)
+    start_train(model_name = model_name, dataset_class = NIHChestXrayDataset, model_factory = factory, model_kwargs = kwargs, **protocol)
 
 
 # ============================================================

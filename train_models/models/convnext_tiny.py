@@ -13,7 +13,7 @@ import timm
 import torch.nn as nn
 
 import config
-from training.experiment import run_experiment
+from training.experiment import start_train
 from utilities.dataset import NIHChestXrayDataset
 
 # ============================================================
@@ -38,7 +38,7 @@ if __name__ == "__main__":
     from utilities.setting import apply_config
 
     apply_config(config.CLIS_CONFIG)
-    run_experiment(
+    start_train(
         model_name     = f"{MODEL_NAME} CLIS {config.IMAGE_SIZE}px",
         dataset_class  = NIHChestXrayDataset,
         model_factory  = ConvNeXtTinyBaseline,
