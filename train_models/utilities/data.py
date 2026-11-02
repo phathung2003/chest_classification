@@ -10,6 +10,7 @@ import random
 import numpy as np
 import pandas as pd
 import torch
+from PIL import Image
 from torch.utils.data import DataLoader, Dataset, Sampler
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
@@ -79,6 +80,22 @@ def check_image_files(*frames):
             f"[check_image_files]: Thiếu ảnh trên đĩa. image_path phải là đường dẫn tương đối theo {config.DATASET_DIRECTORY} (dạng images/x.png); dữ liệu có đường dẫn tuyệt đối của máy khác thì chạy lại notebook tiền xử lý.\n"
             f"Số ảnh bị thiếu: {len(missing_images):,}."
         )
+
+    ## Kích thước ảnh phải bằng IMAGE_SIZE
+    for frame in frames:
+        if frame.empty:
+            continue
+
+        first_image = str(frame["image_path"].iloc[0])
+
+        with Image.open(config.DATASET_DIRECTORY / first_image) as image:
+            image_size = image.size
+
+        if image_size != (config.IMAGE_SIZE, config.IMAGE_SIZE):
+            raise ValueError(
+                "[check_image_files]: Kích thước ảnh phải bằng IMAGE_SIZE trong config.py (ảnh được đọc nguyên kích thước, không resize khi huấn luyện).\n"
+                f"Nhận được: Ảnh {first_image} có kích thước {image_size}, Mong muốn: IMAGE_SIZE = {config.IMAGE_SIZE}"
+            )
 
 # ============================================================
 # Kiểm tra tập dữ liệu
