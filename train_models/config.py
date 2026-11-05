@@ -44,6 +44,7 @@ NEW_MODULE_LR_MULTIPLIER    = 1.0                                               
 GRAD_CLIP_NORM              = None                                                                      # Ngưỡng clip gradient (ví dụ 1.0); None = không clip
 USE_AMP                     = True                                                                      # Huấn luyện mixed precision trên GPU (kiểu AMP_DTYPE)
 AMP_DTYPE                   = "float16"                                                                 # Kiểu AMP: float16 (kèm GradScaler) | bfloat16 (cùng dải số với FP32, không cần GradScaler)
+BLOCK_GRAD_CHECKPOINT       = True                                                                      # Gradient checkpointing từng khối trộn token của CLIS-Mamba (tính lại forward khi backward): cùng phép tính, giảm VRAM, chậm hơn; vào chữ ký qua model_kwargs
 EMA_DECAY                   = 0.9995                                                                    # EMA trọng số: hệ số tối đa (khởi động (1 + n) / (10 + n)); Validation, chọn và lưu mô hình bằng trọng số EMA; None = tắt
 PATIENCE                    = 5                                                                         # Early stopping: số epoch không cải thiện tối đa
 MIN_DELTA                   = 0                                                                         # Early stopping: mức cải thiện tối thiểu
@@ -161,6 +162,7 @@ CLIS_CONFIG = {
     "GRAD_CLIP_NORM"        : 1.0,
     "AMP_DTYPE"             : "bfloat16",
     "ADAM_FUSED"            : True,                 # Fused AdamW: cùng thuật toán với foreach (lệch ở mức làm tròn float32), cần torch >= 2.5 (env mamba-t29); torch 2.4 (env mamba-main) lỗi với gradient conv theo kênh dạng channels-last: --set ADAM_FUSED=False
+    "BLOCK_GRAD_CHECKPOINT" : False,                # Không checkpointing 4 khối MetaFormer: 512 px batch 8 vừa VRAM (3,4 GB), nhanh hơn ~15%; độ phân giải cao hơn: đo VRAM (analysis/benchmark_clis.py) trước khi tắt
     "EVALUATE_FOLD_MODELS_ON_TEST": False,          # Khóa tập Test tới cổng G3 (đăng ký trước kế hoạch phân tích)
 }
 CLIS_PROTOCOL = {
