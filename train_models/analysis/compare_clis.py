@@ -10,8 +10,9 @@ Ví dụ (H1 trên Validation: nhóm tổn thương khu trú L, M-clis so với 
         --b "training_results/nih_chest_xray_14/clis_mamba_v1_m_ras_512px/run_*/fold_1/oof_predictions.csv"
         --name-a M-clis --name-b M-ras --output h1_validation.json
 
-Kết quả: hiệu macro AUROC (A - B) trên 14 nhãn, nhóm L, nhóm C và tương tác (ΔL - ΔC), kèm CI 95% percentile và p-value
-hai phía / một phía (A > B); từng nhãn kèm p-value Holm; AUROC, AUPRC, độ nhạy tại độ đặc hiệu 90%, ECE, Brier của từng cấu hình.
+Kết quả: hiệu macro AUROC (A - B) trên 14 nhãn, nhóm L, nhóm C và tương tác (ΔL - ΔC) theo cách chia chính (kiểm định H1, H1b),
+kèm hai cách chia độ nhạy (chặt, L mở rộng); CI 95% percentile và p-value hai phía / một phía (A > B); từng nhãn kèm p-value Holm;
+AUROC, AUPRC, độ nhạy tại độ đặc hiệu 90%, ECE, Brier của từng cấu hình.
 """
 # Khai báo utilities
 import sys
@@ -33,12 +34,25 @@ from compare_models import holm, load_predictions
 from utilities.file import save_json
 from utilities.statistics import _bootstrap_samples, _interval, _macro, auroc_per_class
 
-# Nhóm nhãn của giả thuyết H1 (đăng ký trước): L = tổn thương khu trú / thường một bên, C = lan tỏa / trung tâm.
-# Infiltration, Pneumonia, Pleural_Thickening không thuộc nhóm nào (chỉ có trong macro 14 nhãn)
-GROUPS = {
-    "L": ["Pneumothorax", "Effusion", "Mass", "Nodule", "Consolidation", "Atelectasis"],
-    "C": ["Cardiomegaly", "Hernia", "Edema", "Emphysema", "Fibrosis"],
+# Các cách chia nhóm nhãn (đăng ký trước, prereg/analysis_plan.md; số đo và quy tắc: analysis/laterality/README.md):
+# L = tổn thương thường bất đối xứng giữa hai bên, C = cấu trúc trung tâm / lan tỏa hai bên.
+# - main      : Cách chia chính, dùng cho kiểm định H1 và H1b (khoá kết quả group_L, group_C, interaction_L_minus_C).
+#               Chỉ nhãn có >= 100 ca dương trên Test vào kiểm định nhóm (Vergouwe 2005, Collins 2016), nên Hernia (86 ca) không vào C chính
+# - strict    : Độ nhạy: chỉ nhãn có cả ChestX-Det và Open-i cho đa số ca một bên
+# - l_extended: Độ nhạy: L thêm Pleural_Thickening, Infiltration (một nguồn cho L, không nguồn nào cho C)
+# - c_hernia  : Độ nhạy: C thêm Hernia (thuộc C theo giải phẫu, nhưng dưới ngưỡng 100 ca dương)
+# - drop_<nhãn>: Độ nhạy: cách chia chính bỏ từng nhãn của L và C (Cochrane Handbook 5.1, mục 9.7)
+# Emphysema, Fibrosis không thuộc nhóm nào (PPV nhãn NIH < 50%); mọi nhãn vẫn tính trong macro 14 nhãn
+MAIN_L = ["Pneumothorax", "Mass", "Atelectasis", "Nodule", "Effusion", "Consolidation", "Pneumonia"]
+MAIN_C = ["Cardiomegaly", "Edema"]
+GROUPINGS = {
+    "main"      : {"L": MAIN_L, "C": MAIN_C},
+    "strict"    : {"L": ["Pneumothorax", "Mass", "Atelectasis", "Nodule"], "C": MAIN_C},
+    "l_extended": {"L": MAIN_L + ["Pleural_Thickening", "Infiltration"], "C": MAIN_C},
+    "c_hernia"  : {"L": MAIN_L, "C": MAIN_C + ["Hernia"]},
+    **{f"drop_{label}": {"L": [c for c in MAIN_L if c != label], "C": [c for c in MAIN_C if c != label]} for label in MAIN_L + MAIN_C},
 }
+GROUPS = GROUPINGS["main"]
 PRACTICAL_DELTA = 0.005                                                     # Ngưỡng ý nghĩa thực tiễn: cận dưới CI > 0 và Δ >= 0.005
 ECE_BINS = 15
 
@@ -103,14 +117,17 @@ def p_values(samples):
 # Bootstrap ghép cặp theo bệnh nhân: cùng mẫu bệnh nhân cho cả hai cấu hình. Nhãn không có ca dương / âm trong một mẫu bootstrap
 # (thường là Hernia) bị bỏ khỏi trung bình của mẫu đó; số lần bỏ được đếm và báo cáo
 def paired_group_bootstrap(targets, probabilities_a, probabilities_b, patients, classes, *, bootstrap_iteration, seed, alpha):
-    index = {name: [classes.index(c) for c in members] for name, members in GROUPS.items()}
+    index = {grouping: {name: [classes.index(c) for c in members] for name, members in groups.items()} for grouping, groups in GROUPINGS.items()}
     point_a, point_b = auroc_per_class(targets, probabilities_a), auroc_per_class(targets, probabilities_b)
 
+    # Cách chia chính không có tiền tố (group_L, group_C, interaction_L_minus_C); cách chia độ nhạy có tiền tố tên (strict_group_L, ...)
     def summaries(a, b):
         values = {"macro_14": _macro(a) - _macro(b)}
-        for name, columns in index.items():
-            values[f"group_{name}"] = _macro(a[columns]) - _macro(b[columns])
-        values["interaction_L_minus_C"] = values["group_L"] - values["group_C"]
+        for grouping, groups in index.items():
+            prefix = "" if grouping == "main" else f"{grouping}_"
+            for name, columns in groups.items():
+                values[f"{prefix}group_{name}"] = _macro(a[columns]) - _macro(b[columns])
+            values[f"{prefix}interaction_L_minus_C"] = values[f"{prefix}group_L"] - values[f"{prefix}group_C"]
         return values
 
     point = summaries(point_a, point_b)
@@ -174,7 +191,7 @@ def main():
     seeds_b = seeds_b[:, order]
     if not (frame_b[classes].to_numpy()[order] == frame_a[classes].to_numpy()).all():
         raise ValueError("Nhãn của hai cấu hình không khớp nhau")
-    missing = [c for members in GROUPS.values() for c in members if c not in classes]
+    missing = sorted({c for groups in GROUPINGS.values() for members in groups.values() for c in members if c not in classes})
     if missing:
         raise ValueError(f"Thiếu các lớp của nhóm L / C: {missing}")
 
@@ -200,7 +217,7 @@ def main():
         }
 
     result = {"method": "patient-level paired percentile bootstrap on seed-averaged probabilities", "bootstrap_iteration": args.n_boot, "seed": args.seed,
-              "confidence": 1 - alpha, "images": len(targets), "patients": int(pd.Series(patients).nunique()), "groups": GROUPS,
+              "confidence": 1 - alpha, "images": len(targets), "patients": int(pd.Series(patients).nunique()), "groups": GROUPS, "groupings": GROUPINGS,
               "practical_delta": PRACTICAL_DELTA, "model_a": args.name_a, "model_b": args.name_b,
               "comparison": comparison, "classes": class_rows, "configurations": configurations}
 

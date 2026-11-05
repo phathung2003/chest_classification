@@ -1,0 +1,210 @@
+[
+ {
+  "class": "Consolidation",
+  "n_images": 1642,
+  "instances": 2563,
+  "one_sided": 0.4951278928136419,
+  "bilateral_asym": 0.08587088915956151,
+  "bilateral_balanced": 0.4190012180267966,
+  "asym_total": 0.5809987819732034,
+  "asym_ci95": [
+   0.5569716574957142,
+   0.6046477838891675
+  ],
+  "crosses_midline": 0.010962241169305725,
+  "asym_total_mid480": 0.5834348355663824,
+  "asym_total_mid544": 0.582216808769793
+ },
+ {
+  "class": "Effusion",
+  "n_images": 1441,
+  "instances": 2112,
+  "one_sided": 0.582234559333796,
+  "bilateral_asym": 0.15197779319916724,
+  "bilateral_balanced": 0.26578764746703676,
+  "asym_total": 0.7342123525329632,
+  "asym_ci95": [
+   0.7108026577615351,
+   0.7563765818173919
+  ],
+  "crosses_midline": 0.0034698126301179735,
+  "asym_total_mid480": 0.7321304649548924,
+  "asym_total_mid544": 0.7356002775850105
+ },
+ {
+  "class": "Fibrosis",
+  "n_images": 500,
+  "instances": 739,
+  "one_sided": 0.616,
+  "bilateral_asym": 0.06,
+  "bilateral_balanced": 0.324,
+  "asym_total": 0.676,
+  "asym_ci95": [
+   0.6337707190597581,
+   0.7155454152173639
+  ],
+  "crosses_midline": 0.002,
+  "asym_total_mid480": 0.684,
+  "asym_total_mid544": 0.676
+ },
+ {
+  "class": "Pleural Thickening",
+  "n_images": 499,
+  "instances": 631,
+  "one_sided": 0.8196392785571143,
+  "bilateral_asym": 0.08016032064128256,
+  "bilateral_balanced": 0.10020040080160321,
+  "asym_total": 0.8997995991983968,
+  "asym_ci95": [
+   0.8703229902256967,
+   0.9231674449332082
+  ],
+  "crosses_midline": 0.006012024048096192,
+  "asym_total_mid480": 0.8997995991983968,
+  "asym_total_mid544": 0.8977955911823647
+ },
+ {
+  "class": "Nodule",
+  "n_images": 392,
+  "instances": 986,
+  "one_sided": 0.7474489795918368,
+  "bilateral_asym": 0.13010204081632654,
+  "bilateral_balanced": 0.12244897959183673,
+  "asym_total": 0.8775510204081632,
+  "asym_ci95": [
+   0.8413866677648543,
+   0.9063871892527002
+  ],
+  "crosses_midline": 0.007653061224489796,
+  "asym_total_mid480": 0.8801020408163265,
+  "asym_total_mid544": 0.8852040816326531
+ },
+ {
+  "class": "Fracture",
+  "n_images": 389,
+  "instances": 661,
+  "one_sided": 0.8226221079691517,
+  "bilateral_asym": 0.03598971722365039,
+  "bilateral_balanced": 0.14138817480719795,
+  "asym_total": 0.8586118251928021,
+  "asym_ci95": [
+   0.8204719472170584,
+   0.8897379694516449
+  ],
+  "crosses_midline": 0.002570694087403599,
+  "asym_total_mid480": 0.8586118251928021,
+  "asym_total_mid544": 0.8586118251928021
+ },
+ {
+  "class": "Atelectasis",
+  "n_images": 297,
+  "instances": 340,
+  "one_sided": 0.8653198653198653,
+  "bilateral_asym": 0.04040404040404041,
+  "bilateral_balanced": 0.09427609427609428,
+  "asym_total": 0.9057239057239057,
+  "asym_ci95": [
+   0.8671183770896714,
+   0.9339676429288367
+  ],
+  "crosses_midline": 0.003367003367003367,
+  "asym_total_mid480": 0.9057239057239057,
+  "asym_total_mid544": 0.9023569023569024
+ },
+ {
+  "class": "Cardiomegaly",
+  "n_images": 293,
+  "instances": 293,
+  "one_sided": 0.030716723549488054,
+  "bilateral_asym": 0.6109215017064846,
+  "bilateral_balanced": 0.3583617747440273,
+  "asym_total": 0.6416382252559727,
+  "asym_ci95": [
+   0.5852238003510503,
+   0.6943866046595683
+  ],
+  "crosses_midline": 0.9761092150170648,
+  "asym_total_mid480": 0.8430034129692833,
+  "asym_total_mid544": 0.378839590443686
+ },
+ {
+  "class": "Calcification",
+  "n_images": 202,
+  "instances": 348,
+  "one_sided": 0.8514851485148515,
+  "bilateral_asym": 0.054455445544554455,
+  "bilateral_balanced": 0.09405940594059406,
+  "asym_total": 0.905940594059406,
+  "asym_ci95": [
+   0.8577726586158999,
+   0.9389564767969613
+  ],
+  "crosses_midline": 0.019801980198019802,
+  "asym_total_mid480": 0.9306930693069307,
+  "asym_total_mid544": 0.9158415841584159
+ },
+ {
+  "class": "Pneumothorax",
+  "n_images": 189,
+  "instances": 211,
+  "one_sided": 0.9788359788359788,
+  "bilateral_asym": 0.015873015873015872,
+  "bilateral_balanced": 0.005291005291005291,
+  "asym_total": 0.9947089947089947,
+  "asym_ci95": [
+   0.9706423605812214,
+   0.9990654203125277
+  ],
+  "crosses_midline": 0.021164021164021163,
+  "asym_total_mid480": 0.9894179894179894,
+  "asym_total_mid544": 0.9894179894179894
+ },
+ {
+  "class": "Emphysema",
+  "n_images": 176,
+  "instances": 298,
+  "one_sided": 0.30113636363636365,
+  "bilateral_asym": 0.028409090909090908,
+  "bilateral_balanced": 0.6704545454545454,
+  "asym_total": 0.32954545454545453,
+  "asym_ci95": [
+   0.26439065587068655,
+   0.401982419101956
+  ],
+  "crosses_midline": 0.022727272727272728,
+  "asym_total_mid480": 0.3352272727272727,
+  "asym_total_mid544": 0.32386363636363635
+ },
+ {
+  "class": "Diffuse Nodule",
+  "n_images": 169,
+  "instances": 290,
+  "one_sided": 0.2958579881656805,
+  "bilateral_asym": 0.04142011834319527,
+  "bilateral_balanced": 0.6627218934911243,
+  "asym_total": 0.33727810650887574,
+  "asym_ci95": [
+   0.27031787376402755,
+   0.4114716954137629
+  ],
+  "crosses_midline": 0.005917159763313609,
+  "asym_total_mid480": 0.33727810650887574,
+  "asym_total_mid544": 0.33727810650887574
+ },
+ {
+  "class": "Mass",
+  "n_images": 148,
+  "instances": 167,
+  "one_sided": 0.9256756756756757,
+  "bilateral_asym": 0.013513513513513514,
+  "bilateral_balanced": 0.060810810810810814,
+  "asym_total": 0.9391891891891891,
+  "asym_ci95": [
+   0.8884743515063959,
+   0.9676810103970613
+  ],
+  "crosses_midline": 0.006756756756756757,
+  "asym_total_mid480": 0.9324324324324325,
+  "asym_total_mid544": 0.9391891891891891
+ }
+]
