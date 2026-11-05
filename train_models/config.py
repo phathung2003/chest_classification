@@ -83,7 +83,7 @@ TRANSFORM_NORMALIZE_STD     = [0.229, 0.224, 0.225]                             
 
 # ============================================================
 # Đánh giá trên tập kiểm tra
-EVALUATE_FOLD_MODELS_ON_TEST = True                                                                     # Đánh giá mô hình tốt nhất của mỗi Fold, tổng hợp mean ± std và ensemble
+EVALUATE_FOLD_MODELS_ON_TEST = False                                                                     # Đánh giá mô hình tốt nhất của mỗi Fold, tổng hợp mean ± std và ensemble
 BOOTSTRAP_ITERATION         = 1000                                                                      # Số lần bootstrap theo bệnh nhân (khoảng tin cậy 95%); 0 = bỏ qua
 BOOTSTRAP_SEED              = 2024                                                                      # Seed của bootstrap
 PATIENT_ID_COLUMN           = "Patient ID"                                                              # Cột mã bệnh nhân dùng để bootstrap
