@@ -25,6 +25,17 @@ from utilities.metric import class_metrics_dataframe, with_probabilities
 from utilities.setting import amp_dtype, set_seed
 
 # ============================================================
+# Tạm dừng có chủ đích sau PAUSE_AFTER_EPOCH epoch (không phải lỗi): last_checkpoint.pt đã lưu, chạy lại để tiếp tục
+# ** Mang điểm tốt nhất tới lúc dừng để hàng đợi xếp hạng các mức learning_rate (models/run_clis.py --halving)
+class TrainingPaused(Exception):
+
+    # Khởi tạo
+    def __init__(self, fold, epoch, best_score, best_epoch, selection_metric, higher_is_better):
+        super().__init__(f"Fold {fold} tạm dừng sau epoch {epoch} (PAUSE_AFTER_EPOCH). Tốt nhất: {selection_metric} = {best_score:.4f} ở epoch {best_epoch}")
+        self.fold, self.epoch, self.best_score, self.best_epoch = fold, epoch, best_score, best_epoch
+        self.selection_metric, self.higher_is_better = selection_metric, higher_is_better
+
+# ============================================================
 # Giải phóng bộ nhớ CPU / GPU giữa các Fold
 def cleanup():
     gc.collect()                                                                # CPU: Thu gom rác
@@ -32,7 +43,32 @@ def cleanup():
         torch.cuda.empty_cache()                                                # GPU: Trả bộ nhớ đệm của PyTorch
 
 # ============================================================
+# Giữ một phần bệnh nhân của tập huấn luyện (mọi ảnh của bệnh nhân được chọn)
+# ** Seed cố định, không theo SEED: Mọi mô hình, mọi seed và mọi mức learning_rate dùng chung một tập con
+# Trả về: DataFrame tập con (giữ thứ tự dòng)
+def subsample_patients(train_df, fraction, seed):
+
+    # Kiểm tra giá trị
+    ## fraction nằm trong khoảng (0, 1]
+    if not 0 < fraction <= 1:
+        raise ValueError(
+            "[subsample_patients]: TRAIN_PATIENT_FRACTION phải nằm trong khoảng (0, 1].\n"
+            f"Nhận được: TRAIN_PATIENT_FRACTION = {fraction}"
+        )
+
+    # Toàn bộ tập huấn luyện
+    if fraction == 1:
+        return train_df
+
+    # Chọn ngẫu nhiên round(fraction x số bệnh nhân) bệnh nhân (sắp xếp mã trước để kết quả không phụ thuộc thứ tự dòng)
+    patients = np.sort(train_df[config.PATIENT_ID_COLUMN].unique())
+    chosen = np.random.default_rng(int(seed)).choice(patients, size = max(1, round(fraction * len(patients))), replace = False)
+
+    return train_df.loc[train_df[config.PATIENT_ID_COLUMN].isin(chosen)].reset_index(drop = True)
+
+# ============================================================
 # Chia dữ liệu cho một Fold (Fold được chọn là Validation, các Fold còn lại là tập huấn luyện)
+# ** TRAIN_PATIENT_FRACTION < 1: Tập huấn luyện chỉ giữ một phần bệnh nhân, Validation giữ nguyên
 # Trả về: (train_df, validation_df)
 def split_fold(train_folds_df, fold):
 
@@ -47,6 +83,9 @@ def split_fold(train_folds_df, fold):
             f"[split_fold]: Không lấy được dữ liệu huấn luyện / kiểm thử cho Fold {fold}.\n"
             f"Nhận được: Huấn luyện = {len(train_df)} ảnh. Kiểm thử = {len(validation_df)} ảnh"
         )
+
+    # Giữ một phần bệnh nhân của tập huấn luyện (TRAIN_PATIENT_FRACTION = 1: giữ toàn bộ)
+    train_df = subsample_patients(train_df, float(config.TRAIN_PATIENT_FRACTION), config.TRAIN_PATIENT_SEED)
 
     return train_df, validation_df
 
@@ -406,6 +445,11 @@ def train_one_fold(experiment_context, fold, train_folds_df):
 
     # 3. Vòng lặp epoch
     gpu_monitor = GPUMonitor.get() if experiment_context.device.type == "cuda" else None
+    pause_after = None if config.PAUSE_AFTER_EPOCH is None else int(config.PAUSE_AFTER_EPOCH)
+
+    ## Đã qua mốc tạm dừng từ lần chạy trước --> Tạm dừng ngay, không huấn luyện thêm
+    if pause_after is not None and not finished and epoch_start - 1 >= pause_after:
+        raise TrainingPaused(fold, epoch_start - 1, best_score, best_epoch, selection_metric, higher_is_better)
 
     for epoch in range(epoch_start, training_config["epochs"] + 1):
         if finished:
@@ -493,6 +537,10 @@ def train_one_fold(experiment_context, fold, train_folds_df):
         ## Cảnh báo khi mọi bước cập nhật của epoch đều bị AMP bỏ qua
         if not math.isfinite(train_stats["grad_norm_max"]):
             print("CẢNH BÁO: mọi bước cập nhật trong epoch đều bị AMP bỏ qua (gradient tràn số FP16)")
+
+        ## Tạm dừng sau PAUSE_AFTER_EPOCH epoch (checkpoint và mô hình tốt nhất đã lưu ở trên)
+        if pause_after is not None and not finished and epoch >= pause_after:
+            raise TrainingPaused(fold, epoch, best_score, best_epoch, selection_metric, higher_is_better)
 
     # Giải phóng DataLoader
     del train_loader, validation_loader

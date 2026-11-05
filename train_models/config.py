@@ -20,6 +20,8 @@ MODELS_OUTPUT_DIRECTORY     = (ROOT_DIRECTORY / "training_results").resolve()   
 NUMBER_OF_FOLDS             = 5                                                                         # Số Fold khi chia dữ liệu (notebook tiền xử lý)
 TRAIN_ALL_FOLD              = False                                                                     # True: chạy đủ mọi Fold (bắt buộc cho kết quả chính thức)
 SELECTED_FOLD               = [1]                                                                       # Fold chạy khi TRAIN_ALL_FOLD = False
+TRAIN_PATIENT_FRACTION      = 1.0                                                                       # Tỉ lệ bệnh nhân của tập huấn luyện được giữ (Validation giữ nguyên); < 1: tinh chỉnh siêu tham số với ngân sách nhỏ
+TRAIN_PATIENT_SEED          = 2026                                                                      # Seed chọn tập con bệnh nhân (cố định, không theo SEED: mọi mô hình, seed và learning_rate dùng chung một tập con)
 IMAGE_SIZE                  = 224                                                                       # Kích thước ảnh đầu vào (ảnh đã resize sẵn)
 IMAGE_VARIANT               = None                                                                      # Bộ ảnh: None = images_<IMAGE_SIZE>/ (images/ ở kích thước gốc); "aligned" = images_<IMAGE_SIZE>_aligned/ đã căn đường giữa (preprocess/align_midline.py)
 IMAGE_EXTENSION             = {".png", ".jpg", ".jpeg"}                                                 # Định dạng ảnh hợp lệ
@@ -58,6 +60,7 @@ SCHEDULER_THRESHOLD         = 1e-4                                              
 SCHEDULER_WARMUP_EPOCHS     = 1                                                                         # warmup_cosine: LR tăng tuyến tính trong số epoch này rồi giảm theo cosine về 0 ở epoch EPOCHS (cập nhật mỗi bước tối ưu)
 THRESHOLD                   = 0.5                                                                       # Ngưỡng mặc định để tính Precision/Recall/F1
 RESUME_TRAINING             = True                                                                      # Chạy tiếp lượt chạy dở nếu chữ ký cấu hình khớp
+PAUSE_AFTER_EPOCH           = None                                                                      # Tạm dừng Fold sau epoch này (checkpoint đã lưu, chạy lại để tiếp tục; loại dần mức learning_rate khi tinh chỉnh); None = không tạm dừng; không vào chữ ký
 
 # ============================================================
 # Tái lập kết quả
