@@ -160,7 +160,7 @@ CLIS_CONFIG = {
     "GRAD_ACCUM_STEPS"      : 4,                    # Batch hiệu dụng 32
     "GRAD_CLIP_NORM"        : 1.0,
     "AMP_DTYPE"             : "bfloat16",
-    "ADAM_FUSED"            : False,                # torch 2.4 (env WSL có kernel mamba-ssm) chưa chạy được fused AdamW với gradient conv theo kênh dạng channels-last
+    "ADAM_FUSED"            : True,                 # Fused AdamW: cùng thuật toán với foreach (lệch ở mức làm tròn float32), cần torch >= 2.5 (env mamba-t29); torch 2.4 (env mamba-main) lỗi với gradient conv theo kênh dạng channels-last: --set ADAM_FUSED=False
     "EVALUATE_FOLD_MODELS_ON_TEST": False,          # Khóa tập Test tới cổng G3 (đăng ký trước kế hoạch phân tích)
 }
 CLIS_PROTOCOL = {
