@@ -44,7 +44,8 @@ train_models/
 │
 ├── analysis/
 │   ├── benchmark_clis.py         # VRAM đỉnh / thời gian một bước theo độ phân giải và micro-batch (cổng G0, E5)
-│   └── compare_clis.py           # So sánh ghép cặp: trung bình qua seed, bootstrap theo bệnh nhân, nhóm L / C, tương tác ΔL - ΔC
+│   ├── compare_clis.py           # So sánh ghép cặp: trung bình qua seed, bootstrap theo bệnh nhân, nhóm L / C, tương tác ΔL - ΔC
+│   └── laterality/               # Bằng chứng phân nhóm L / C (PPV, ChestX-Det, Open-i), kết quả kèm SHA-256
 │
 ├── prereg/
 │   └── analysis_plan.md          # Bản nháp đăng ký trước kế hoạch phân tích của nghiên cứu CLIS (chốt trước cổng G3)
@@ -277,17 +278,18 @@ Cách đọc kết quả: nếu khoảng tin cậy 95% của hiệu không chứ
 
 ## Nghiên cứu CLIS-Mamba (WSL2)
 
-Biến thể SS2D cần kernel `selective_scan_cuda` của mamba-ssm, chỉ có trong WSL2: env conda `mamba-main` (torch 2.4, mamba-ssm 2.2.2). Repo đọc trực tiếp từ `/mnt/e`. Mọi mô hình của nghiên cứu (DenseNet121, ConvNeXt-T, các biến thể CLIS-Mamba) dùng chung `CLIS_CONFIG` + `CLIS_PROTOCOL` trong `config.py`:
+Biến thể SS2D cần kernel `selective_scan_cuda` của mamba-ssm, chỉ có trong WSL2: env conda `mamba-t29` (torch 2.9.1 + cu128, mamba-ssm 2.3.2.post1, các gói khác cùng phiên bản với env cũ). Env `mamba-main` (torch 2.4.0, mamba-ssm 2.2.2) giữ lại để tái lập các lượt tinh chỉnh đầu, cần `--set ADAM_FUSED=False`. Repo đọc trực tiếp từ `/mnt/e`. Mọi mô hình của nghiên cứu (DenseNet121, ConvNeXt-T, các biến thể CLIS-Mamba) dùng chung `CLIS_CONFIG` + `CLIS_PROTOCOL` trong `config.py`:
 
 - 512 px, ảnh đã căn đường giữa, không lật ngang;
 - micro-batch 8 × tích lũy 4, BF16, BCE;
-- AdamW: backbone 1e-4, lớp mới 5e-4, weight decay 0.05 (không áp dụng cho bias / norm / mã hóa vị trí / A_log, D, dt_bias);
+- AdamW (fused): backbone 1e-4, lớp mới 1e-4 × m* của từng mô hình (`CLIS_LR_MULTIPLIER`, chọn bằng tinh chỉnh loại dần trên 30% bệnh nhân), weight decay 0.05 (không áp dụng cho bias / norm / mã hóa vị trí / A_log, D, dt_bias);
+- không checkpointing 4 khối MetaFormer ở 512 px (`BLOCK_GRAD_CHECKPOINT = False`: cùng phép tính, nhanh hơn, VRAM 3,4 GB);
 - warmup 1 epoch rồi cosine, 20 epoch, patience 4;
 - Fold 1 làm Validation; tập Test bị khóa (`EVALUATE_FOLD_MODELS_ON_TEST = False`) tới cổng G3.
 
 ```
 wsl -d Ubuntu-24.04
-conda activate mamba-main
+conda activate mamba-t29
 cd "/mnt/e/New folder/chest_classification/train_models"
 
 python tests/test_clis_mamba.py              # Cổng G0: phải 0 lỗi, 0 bỏ qua
@@ -297,7 +299,9 @@ python analysis/benchmark_clis.py            # VRAM / thời gian ở 512, 768, 
 python preprocess/align_midline.py 512 --chexmask <CheXmask>/OriginalResolution/ChestX-Ray8.csv --check 50   # Kiểm quy ước RLE bằng mắt trước
 python preprocess/align_midline.py 512 --chexmask <CheXmask>/OriginalResolution/ChestX-Ray8.csv
 
-python models/run_clis.py densenet121 convnext_t --seeds 42 43 44                 # E1
-python models/run_clis.py m_ras m_clis m_rand gatedconv attn flipdiff             # E2 / E3 ở 512 px
+python models/run_clis.py densenet121 convnext_t --seeds 42 43 44 --min-score 0.82                # E1, cổng G1
+python models/run_clis.py m_clis m_rand m_ras gatedconv attn flipdiff --seeds 42 43 44             # E2 / E3 ở 512 px
+python preprocess/align_midline.py 1024 --chexmask <CheXmask>/OriginalResolution/ChestX-Ray8.csv   # Bộ ảnh 1024 px đã căn cho R*
+python models/run_clis.py m_clis m_rand m_ras --seeds 42 43 44 --init-from-size 512 --lr 5e-5 --set IMAGE_SIZE=1024 BATCH_SIZE=4 GRAD_ACCUM_STEPS=8 EPOCHS=5   # E3 ở R* = 1024 px
 python analysis/compare_clis.py --a "<m_clis>/run_*/fold_1/oof_predictions.csv" --b "<m_ras>/run_*/fold_1/oof_predictions.csv" --name-a M-clis --name-b M-ras
 ```
