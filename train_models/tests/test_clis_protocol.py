@@ -1,5 +1,6 @@
 # Kiểm thử dữ liệu và giao thức của nghiên cứu CLIS: RLE CheXmask, căn đường giữa, không lật ngang, thư mục ảnh,
-# lịch LR warmup + cosine, nhóm tham số không weight decay. Không cần GPU.
+# tập con bệnh nhân cho tinh chỉnh, chọn hệ số LR khi loại dần, bảng hệ số LR m* và cách tìm lượt chạy theo m*, tổng kết điểm qua seed,
+# lịch LR warmup + cosine, nhóm tham số không weight decay, cấu hình chạy (checkpointing khối, fused AdamW), đọc phiên bản thư viện. Không cần GPU.
 #   python tests/test_clis_protocol.py      (hoặc pytest)
 
 # Khai báo utilities
@@ -10,15 +11,19 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"                         # cuBLAS tất định (DETERMINISTIC_ALGORITHMS)
+os.environ["TRITON_CACHE_AUTOTUNING"] = "1"                                # mamba-ssm >= 2.3 ở chế độ tất định: lưu autotune kernel Triton (CLIS không dùng) thay vì cảnh báo
 
 # Khai báo thư viện
 import copy
+import json
 import math
+import tempfile
 import time
 import traceback
 
 import numpy as np
+import pandas as pd
 import torch
 from torchvision import transforms
 
@@ -26,6 +31,7 @@ import config
 import models.clis_mamba as clis
 import preprocess.align_midline as align
 from training.optimizer import build_training_config, make_optimizer, make_scheduler
+from training.train import subsample_patients
 from utilities.data import image_directory, transform_setting
 from utilities.setting import apply_config
 
@@ -103,6 +109,103 @@ def test_image_directory():
             assert image_directory(224) == expected, f"{size} / {variant}: {image_directory(224)}"
 
 
+def test_subsample_patients():
+    # Tập con cho tinh chỉnh siêu tham số: giữ trọn bệnh nhân, đúng tỉ lệ, cố định theo TRAIN_PATIENT_SEED (không theo SEED / thứ tự dòng)
+    patient = config.PATIENT_ID_COLUMN
+    frame = pd.DataFrame({patient: np.random.default_rng(1).integers(0, 500, 3000), "row": np.arange(3000)})
+    assert subsample_patients(frame, 1.0, 2026) is frame, "TRAIN_PATIENT_FRACTION = 1 phải giữ nguyên tập huấn luyện"
+
+    part = subsample_patients(frame, 0.3, 2026)
+    kept = set(part[patient])
+    assert len(kept) == round(0.3 * frame[patient].nunique()), f"Số bệnh nhân giữ lại: {len(kept)}"
+    assert len(part) == int(frame[patient].isin(kept).sum()), "Phải giữ mọi ảnh của bệnh nhân được chọn"
+    assert part["row"].is_monotonic_increasing, "Phải giữ thứ tự dòng"
+
+    with override_config(SEED = 7):
+        again = subsample_patients(frame.sample(frac = 1, random_state = 3), 0.3, 2026)
+    assert set(again[patient]) == kept, "Tập con phải giống nhau với mọi SEED và mọi thứ tự dòng"
+    assert set(subsample_patients(frame, 0.3, 2027)[patient]) != kept, "TRAIN_PATIENT_SEED khác phải cho tập con khác"
+
+    for fraction in (0.0, -0.1, 1.5):
+        try:
+            subsample_patients(frame, fraction, 2026)
+        except ValueError:
+            continue
+        raise AssertionError(f"TRAIN_PATIENT_FRACTION = {fraction} phải báo lỗi")
+
+
+def test_select_survivors():
+    # Loại dần mức LR: giữ các hệ số có điểm tốt nhất, hòa điểm thì giữ thứ tự đã khai báo
+    from models.run_clis import select_survivors
+    auroc = {5.0: 0.82, 2.0: 0.80, 10.0: 0.82, 20.0: 0.78}
+    results = {m: {"best_score": s, "higher_is_better": True} for m, s in auroc.items()}
+    assert select_survivors(results, 2) == [5.0, 10.0], select_survivors(results, 2)
+    assert select_survivors(results, 1) == [5.0]
+    loss = {m: {"best_score": s, "higher_is_better": False} for m, s in {5.0: 0.20, 2.0: 0.18, 10.0: 0.25}.items()}
+    assert select_survivors(loss, 2) == [2.0, 5.0], "validation_loss: điểm thấp hơn là tốt hơn"
+
+
+def test_lr_multiplier_table():
+    # Mọi mô hình của hàng đợi có hệ số m* dương; ablation m_clis4 giữ hệ số của m_clis;
+    # bảng không vào chữ ký (hệ số của mô hình đang chạy vào chữ ký qua training_config)
+    import models.run_clis as run_clis
+    from utilities.tracking import config_snapshot
+    assert set(config.CLIS_LR_MULTIPLIER) == set(run_clis.NAMES), sorted(set(config.CLIS_LR_MULTIPLIER) ^ set(run_clis.NAMES))
+    assert all(math.isfinite(m) and m > 0 for m in config.CLIS_LR_MULTIPLIER.values()), config.CLIS_LR_MULTIPLIER
+    assert config.CLIS_LR_MULTIPLIER["m_clis4"] == config.CLIS_LR_MULTIPLIER["m_clis"]
+    assert "CLIS_LR_MULTIPLIER" not in config_snapshot()
+
+
+# Tạo một lượt chạy giả (train_info.json, fold_1, fold_done.json) cho kiểm thử tìm lượt chạy. Trả về thư mục fold_1
+def write_run(directory, index, multiplier, learning_rate = 1e-4, seed = 42, done = True):
+    fold_directory = directory / f"run_{index}" / "fold_1"
+    fold_directory.mkdir(parents = True)
+    settings = {"seed": seed, "image_size": 512, "model_kwargs": {"mixer": "m_clis"}, "torch_version": torch.__version__, "config": {},
+                "training_config": {"optimizer": {"learning_rate": learning_rate, "new_module_lr_multiplier": multiplier}}}
+    (fold_directory.parent / "train_info.json").write_text(json.dumps({"settings": settings}), encoding = "utf-8")
+    if done:
+        (fold_directory / "fold_done.json").write_text("{}", encoding = "utf-8")
+    return fold_directory
+
+
+def test_runs_found_by_lr_multiplier():
+    # Điểm khởi đầu cho độ phân giải cao (find_checkpoint) là lượt 512 px có hệ số m* của biến thể, không phải hệ số mặc định ×5
+    # của CLIS_PROTOCOL; tìm lượt chạy theo (seed, hệ số, LR backbone) cho điểm của hàng đợi
+    import models.run_clis as run_clis
+    from utilities.file import to_snake_case
+    multiplier = config.CLIS_LR_MULTIPLIER["m_clis"]
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        info_path = root / "dataset_info.json"
+        info_path.write_text(json.dumps({"dataset_name": "NIH Test"}), encoding = "utf-8")
+        directory = root / to_snake_case("NIH Test") / to_snake_case(clis.model_name("m_clis", 512))
+        default = write_run(directory, 1, 5.0)                                     # Hệ số mặc định của CLIS_PROTOCOL
+        chosen = write_run(directory, 2, multiplier)                                # m* của m_clis
+        lower = write_run(directory, 3, multiplier, learning_rate = 5e-5)           # Cùng m*, LR backbone khác (--lr)
+        write_run(directory, 4, multiplier, seed = 43, done = False)                # Seed khác, chưa xong fold
+        with override_config(MODELS_OUTPUT_DIRECTORY = root, DATASET_INFO_DIRECTORY = info_path):
+            assert run_clis.find_checkpoint("m_clis", 42, 1, 512) == chosen / "best_model.pt"
+            assert run_clis.find_fold_directory("m_clis", 42, multiplier, 1, {}, learning_rate = 1e-4) == chosen
+            assert run_clis.find_fold_directory("m_clis", 42, multiplier, 1, {}, learning_rate = 5e-5) == lower
+            assert run_clis.find_fold_directory("m_clis", 42, 5.0, 1, {}) == default
+            assert run_clis.find_fold_directory("m_clis", 44, multiplier, 1, {}) is None
+            try:
+                run_clis.find_checkpoint("m_clis", 43, 1, 512)
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("Lượt chưa xong fold không được làm điểm khởi đầu")
+
+
+def test_seed_summary():
+    # Tổng kết điểm Validation qua seed: trung bình và độ lệch chuẩn mẫu; một seed --> độ lệch chuẩn 0
+    from models.run_clis import seed_summary
+    summary = seed_summary({("densenet121", 10.0): {42: 0.82, 43: 0.84, 44: 0.83}, ("convnext_t", 40.0): {42: 0.83}})
+    mean, spread = summary[("densenet121", 10.0)]
+    assert math.isclose(mean, 0.83) and math.isclose(spread, 0.01), summary
+    assert summary[("convnext_t", 40.0)] == (0.83, 0.0), summary
+
+
 # ============================================================
 # 3. Tối ưu theo giao thức CLIS
 def test_warmup_cosine_schedule():
@@ -139,6 +242,45 @@ def test_parameter_groups_without_weight_decay():
     for name in ("blocks.0.mixer.x_proj", "blocks.0.mixer.in_proj.weight", "head.weight"):
         assert name not in no_decay, f"{name} phải có weight decay"
     assert sum(len(g["params"]) for g in groups) == len(list(model.parameters())), "Mỗi tham số phải thuộc đúng một nhóm"
+
+
+# ============================================================
+# 4. Cấu hình chạy và môi trường
+def test_run_child_settings():
+    # Biến thể CLIS-Mamba nhận grad_checkpoint theo BLOCK_GRAD_CHECKPOINT (vào chữ ký qua model_kwargs), baseline không nhận;
+    # optimizer dùng fused AdamW theo CLIS_CONFIG
+    import models.run_clis as run_clis
+    saved = {name: copy.deepcopy(getattr(config, name)) for name in set(config.CLIS_CONFIG) | {"SEED", "TRAIN_ALL_FOLD", "SELECTED_FOLD"}}
+    captured = []
+    original, run_clis.start_train = run_clis.start_train, lambda **kwargs: captured.append(kwargs)
+    try:
+        run_clis.run_child("m_clis", 42, 1, 2.0, {})
+        run_clis.run_child("m_clis", 42, 1, 2.0, {"BLOCK_GRAD_CHECKPOINT": True})
+        run_clis.run_child("convnext_t", 42, 1, 20.0, {})
+        run_clis.run_child("densenet121", 42, 1, None, {})
+        run_clis.run_child("flipdiff", 42, 1, None, {})
+    finally:
+        run_clis.start_train = original
+        apply_config(saved)
+    assert captured[0]["model_kwargs"] == {"mixer": "m_clis", "grad_checkpoint": config.CLIS_CONFIG["BLOCK_GRAD_CHECKPOINT"]}, captured[0]["model_kwargs"]
+    assert captured[1]["model_kwargs"]["grad_checkpoint"] is True, "--set BLOCK_GRAD_CHECKPOINT=True phải bật lại checkpointing khối"
+    assert captured[2]["model_kwargs"] == {}, "Baseline không có checkpointing khối"
+    assert captured[0]["optimizer_config"]["new_module_lr_multiplier"] == 2.0
+    assert captured[2]["optimizer_config"]["new_module_lr_multiplier"] == 20.0, "--lr-multiplier ghi đè bảng m*"
+    for index, name in ((3, "densenet121"), (4, "flipdiff")):
+        assert captured[index]["optimizer_config"]["new_module_lr_multiplier"] == config.CLIS_LR_MULTIPLIER[name], f"Không truyền hệ số: {name} phải dùng m* của bảng"
+    assert config.CLIS_PROTOCOL["optimizer_config"]["new_module_lr_multiplier"] == 5.0, "run_child không được sửa CLIS_PROTOCOL dùng chung"
+    with override_config(**config.CLIS_CONFIG):
+        training_config = build_training_config(config.CLIS_PROTOCOL["optimizer_config"], config.CLIS_PROTOCOL["scheduler_config"], "macro_auroc")
+    assert training_config["optimizer"]["fused"] is bool(config.CLIS_CONFIG["ADAM_FUSED"]), training_config["optimizer"]
+
+
+def test_version_parsing():
+    # Đọc phiên bản thư viện: bỏ hậu tố build (+cu128) và nhãn (rc, post, dev)
+    from utilities.environment import parse_version
+    cases = {"2.9.1+cu128": (2, 9, 1), "2.3.2.post1": (2, 3, 2), "1.0.30": (1, 0, 30), "2.10.0rc1": (2, 10, 0), "0.24.1": (0, 24, 1), "dev": ()}
+    for text, expected in cases.items():
+        assert parse_version(text) == expected, f"{text} --> {parse_version(text)}, cần {expected}"
 
 
 # ============================================================

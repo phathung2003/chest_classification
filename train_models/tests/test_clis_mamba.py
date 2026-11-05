@@ -1,7 +1,7 @@
 # Kiểm thử cổng G0 của CLIS-Mamba (models/clis_mamba.py): hoán vị, kernel selective scan, độc lập giữa các tuyến,
 # khớp số tham số, CAM, nội suy mã hóa vị trí, gradient checkpointing, chế độ tất định.
 #   Windows  : python tests/test_clis_mamba.py         (các kiểm thử cần kernel CUDA được bỏ qua)
-#   WSL2     : conda activate mamba-main && python tests/test_clis_mamba.py
+#   WSL2     : conda activate mamba-t29 && python tests/test_clis_mamba.py      (env mamba-main: torch 2.4 của các lượt tinh chỉnh đầu, cũng phải đạt)
 # Chạy được cả bằng pytest. Cổng G0 đạt khi KHÔNG có kiểm thử nào lỗi và không có kiểm thử kernel nào bị bỏ qua (chạy trong WSL2).
 
 # Khai báo utilities
@@ -12,7 +12,8 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"                         # cuBLAS tất định (DETERMINISTIC_ALGORITHMS)
+os.environ["TRITON_CACHE_AUTOTUNING"] = "1"                                # mamba-ssm >= 2.3 ở chế độ tất định: lưu autotune kernel Triton (CLIS không dùng) thay vì cảnh báo
 
 # Khai báo thư viện
 import tempfile
