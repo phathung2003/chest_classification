@@ -167,9 +167,24 @@ CLIS_CONFIG = {
 }
 CLIS_PROTOCOL = {
     "loss_config"           : {"name": "bce", "pos_weight_alpha": 0.0},                                         # BCE không pos_weight
-    "optimizer_config"      : {"name": "adamw", "learning_rate": 1e-4, "weight_decay": 0.05, "new_module_lr_multiplier": 5.0, "no_weight_decay_1d": True},   # Backbone 1e-4, lớp mới 5e-4
+    "optimizer_config"      : {"name": "adamw", "learning_rate": 1e-4, "weight_decay": 0.05, "new_module_lr_multiplier": 5.0, "no_weight_decay_1d": True},   # Backbone 1e-4; lớp mới 1e-4 x CLIS_LR_MULTIPLIER của mô hình (5.0: mức xuất phát của lưới tinh chỉnh)
     "scheduler_config"      : {"name": "warmup_cosine", "warmup_epochs": 1},
     "selection_metric"      : "macro_auroc",
+}
+
+# Hệ số LR lớp mới m* của từng mô hình (LR lớp mới = learning_rate x m*): chọn bằng tinh chỉnh loại dần trên 30% bệnh nhân, fold 1, seed 42
+# (prereg/lr_tuning_protocol.md; điểm trong training_results/clis_tuning/*_halving_*.json). models/run_clis.py dùng thay cho
+# new_module_lr_multiplier của CLIS_PROTOCOL khi không truyền --lr-multiplier. Giá trị thực tế vào chữ ký qua training_config
+CLIS_LR_MULTIPLIER = {
+    "densenet121"   : 10.0,                         # Validation macro AUROC 0.8231 (x20: 0.8206)
+    "convnext_t"    : 40.0,                         # 0.8238 (x20: 0.8230); biên trên của lưới {2, 5, 10, 20, 40}
+    "m_ras"         : 2.0,                          # 0.8134 (x5: 0.8092)
+    "m_clis"        : 2.0,                          # 0.8141 (x5: 0.8089)
+    "m_rand"        : 2.0,                          # 0.8147 (x5: 0.8091)
+    "m_clis4"       : 2.0,                          # Ablation E8: không tinh chỉnh riêng, giữ hệ số của m_clis
+    "gatedconv"     : 5.0,                          # 0.8064 (x20: 0.7960)
+    "attn"          : 2.0,                          # 0.8114 (x5: 0.8096)
+    "flipdiff"      : 1.0,                          # 0.8033 (x5: 0.8020); biên dưới của lưới {1, 2, 5, 10, 20}
 }
 
 # ============================================================
