@@ -47,9 +47,6 @@ train_models/
 │   ├── compare_clis.py           # So sánh ghép cặp: trung bình qua seed, bootstrap theo bệnh nhân, nhóm L / C, tương tác ΔL - ΔC
 │   └── laterality/               # Bằng chứng phân nhóm L / C (PPV, ChestX-Det, Open-i), kết quả kèm SHA-256
 │
-├── prereg/
-│   └── analysis_plan.md          # Bản nháp đăng ký trước kế hoạch phân tích của nghiên cứu CLIS (chốt trước cổng G3)
-│
 ├── tests/
 │   ├── test_clis_mamba.py        # Cổng G0: hoán vị, kernel selective scan khớp bản tham chiếu, độc lập giữa các tuyến, số tham số, CAM, checkpointing
 │   └── test_clis_protocol.py     # RLE CheXmask, căn đường giữa, không lật ngang, lịch LR warmup + cosine, nhóm không weight decay
