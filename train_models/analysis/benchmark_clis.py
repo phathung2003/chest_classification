@@ -1,9 +1,10 @@
 # Đo VRAM đỉnh và thời gian một bước huấn luyện của CLIS-Mamba theo độ phân giải và micro-batch (cổng G0, thí nghiệm E5).
-# Cùng chế độ với lúc huấn luyện: train(), autocast BF16, checkpointing từng khối, AdamW như config.CLIS_CONFIG, chế độ tất định như config.py.
+# Cùng chế độ với lúc huấn luyện: train(), autocast BF16, checkpointing từng khối theo config.CLIS_CONFIG["BLOCK_GRAD_CHECKPOINT"] (--block-checkpoint),
+# AdamW như config.CLIS_CONFIG (fused), chế độ tất định như config.py.
 # Dữ liệu tổng hợp trên GPU (không tính DataLoader). Nên cắm sạc, đặt chế độ hiệu năng, không chạy việc khác trên GPU.
-#   conda activate mamba-main
+#   conda activate mamba-t29
 #   python analysis/benchmark_clis.py
-#   python analysis/benchmark_clis.py --mixers m_clis --sizes 1024 --batches 1 2 --backbone-checkpoint off on
+#   python analysis/benchmark_clis.py --mixers m_clis --sizes 1024 --batches 1 2 --backbone-checkpoint off on --block-checkpoint off on
 # Quy tắc chốt độ phân giải (tài liệu G0): chọn 1024 nếu micro-batch >= 2 có VRAM đỉnh (reserved) <= 7.0 GB và
 # thời gian ước tính của E3 + E4 ở 1024 nằm trong ngân sách GPU còn lại; ngược lại chọn 768.
 
@@ -15,7 +16,8 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"                         # cuBLAS tất định (DETERMINISTIC_ALGORITHMS)
+os.environ["TRITON_CACHE_AUTOTUNING"] = "1"                                # mamba-ssm >= 2.3 ở chế độ tất định: lưu autotune kernel Triton (CLIS không dùng) thay vì cảnh báo
 
 # Khai báo thư viện
 import argparse
@@ -29,6 +31,7 @@ import torch.nn.functional as F
 
 import config
 import models.clis_mamba as clis
+from utilities.environment import check_environment
 from utilities.log import GPUMonitor, timestamp
 from utilities.setting import set_seed
 
@@ -38,10 +41,10 @@ MEMORY_LIMIT_GB = 7.0                                                       # Ch
 
 # ============================================================
 # Một cấu hình: trả về dict kết quả, hoặc None nếu hết bộ nhớ
-def measure(mixer, size, batch, backbone_checkpoint, warmup, steps, monitor):
+def measure(mixer, size, batch, backbone_checkpoint, block_checkpoint, warmup, steps, monitor):
     model = optimizer = x = y = None
     try:
-        model = clis.CLISMamba(14, mixer = mixer, pretrained = False, backbone_checkpoint = backbone_checkpoint).cuda().train()
+        model = clis.CLISMamba(14, mixer = mixer, pretrained = False, grad_checkpoint = block_checkpoint, backbone_checkpoint = backbone_checkpoint).cuda().train()
         optimizer = torch.optim.AdamW(model.parameters(), lr = 1e-4, fused = bool(config.CLIS_CONFIG["ADAM_FUSED"]))
         x = torch.randn(batch, 3, size, size, device = "cuda")
         y = (torch.rand(batch, 14, device = "cuda") > 0.9).float()
@@ -110,37 +113,41 @@ if __name__ == "__main__":
     parser.add_argument("--sizes", nargs = "+", type = int, default = [512, 768, 1024])
     parser.add_argument("--batches", nargs = "+", type = int, default = [1, 2, 4, 8])
     parser.add_argument("--backbone-checkpoint", nargs = "+", choices = ["off", "on"], default = ["off", "on"])
+    parser.add_argument("--block-checkpoint", nargs = "+", choices = ["off", "on"], default = ["on" if config.CLIS_CONFIG["BLOCK_GRAD_CHECKPOINT"] else "off"],
+                        help = "Checkpointing 4 khối MetaFormer (mặc định theo CLIS_CONFIG)")
     parser.add_argument("--warmup", type = int, default = 3)
     parser.add_argument("--steps", type = int, default = 10)
     parser.add_argument("--output", type = Path, default = config.MODELS_OUTPUT_DIRECTORY / "benchmarks" / f"clis_benchmark_{time.strftime('%Y%m%d_%H%M%S')}.csv")
     args = parser.parse_args()
-    if not torch.cuda.is_available():
-        parser.error("Cần GPU CUDA")
-    if clis.selective_scan_fn is None and any(m in clis.ROUTES for m in args.mixers):
-        parser.error("Biến thể SS2D cần kernel selective_scan_cuda của mamba-ssm: chạy trong WSL2 (conda activate mamba-main)")
+    check_environment(require_kernel = any(m in clis.ROUTES for m in args.mixers), amp_dtype = "bfloat16",
+                      deterministic = config.DETERMINISTIC_ALGORITHMS, adam_fused = config.CLIS_CONFIG["ADAM_FUSED"])
 
     set_seed()                                                              # Chế độ tất định như lúc huấn luyện (config.py)
     monitor = GPUMonitor.get()
-    print(f"[{timestamp()}] {torch.cuda.get_device_name(0)} | torch {torch.__version__} | tất định {torch.are_deterministic_algorithms_enabled()} | BF16 | checkpointing từng khối")
+    print(f"[{timestamp()}] {torch.cuda.get_device_name(0)} | torch {torch.__version__} | tất định {torch.are_deterministic_algorithms_enabled()} | BF16 | "
+          f"fused AdamW {bool(config.CLIS_CONFIG['ADAM_FUSED'])}")
 
     rows = []
     for mixer in args.mixers:
         for size in args.sizes:
-            for backbone_checkpoint in [value == "on" for value in args.backbone_checkpoint]:
-                for batch in sorted(args.batches):
-                    result = measure(mixer, size, batch, backbone_checkpoint, args.warmup, args.steps, monitor)
-                    row = {"mixer": mixer, "size": size, "tokens": (size // 16) ** 2, "batch": batch, "backbone_checkpoint": backbone_checkpoint, "oom": result is None, **(result or {})}
-                    rows.append(row)
-                    if result is None:
-                        print(f"{mixer:9s} {size:5d} px | batch {batch} | backbone ckpt {backbone_checkpoint!s:5s} | HẾT BỘ NHỚ", flush = True)
-                        break                                               # Batch lớn hơn cũng sẽ hết bộ nhớ
-                    print(f"{mixer:9s} {size:5d} px | batch {batch} | backbone ckpt {backbone_checkpoint!s:5s} | "
-                          f"VRAM {result['peak_allocated_gb']:.2f} / {result['peak_reserved_gb']:.2f} GB (allocated / reserved) | "
-                          f"{result['step_seconds'] * 1000:6.0f} ms/bước | {result['train_images_per_second']:6.1f} ảnh/s huấn luyện, "
-                          f"{result['eval_images_per_second']:6.1f} ảnh/s suy luận | {result['hours_per_epoch']:.2f} giờ/epoch | "
-                          f"xung SM {result['sm_clock_mean_mhz']} MHz, {result['temperature_max_c']}°C", flush = True)
-                    if not result["within_memory_limit"]:
-                        break                                               # Vượt giới hạn: WSL / WDDM tràn sang RAM dùng chung, batch lớn hơn chỉ chậm hơn
+            for block_checkpoint in [value == "on" for value in args.block_checkpoint]:
+                for backbone_checkpoint in [value == "on" for value in args.backbone_checkpoint]:
+                    for batch in sorted(args.batches):
+                        result = measure(mixer, size, batch, backbone_checkpoint, block_checkpoint, args.warmup, args.steps, monitor)
+                        row = {"mixer": mixer, "size": size, "tokens": (size // 16) ** 2, "batch": batch, "block_checkpoint": block_checkpoint, "backbone_checkpoint": backbone_checkpoint,
+                               "oom": result is None, **(result or {}), "adam_fused": bool(config.CLIS_CONFIG["ADAM_FUSED"]), "torch_version": torch.__version__}
+                        rows.append(row)
+                        setting = f"{mixer:9s} {size:5d} px | batch {batch} | block ckpt {block_checkpoint!s:5s} | backbone ckpt {backbone_checkpoint!s:5s}"
+                        if result is None:
+                            print(f"{setting} | HẾT BỘ NHỚ", flush = True)
+                            break                                           # Batch lớn hơn cũng sẽ hết bộ nhớ
+                        print(f"{setting} | "
+                              f"VRAM {result['peak_allocated_gb']:.2f} / {result['peak_reserved_gb']:.2f} GB (allocated / reserved) | "
+                              f"{result['step_seconds'] * 1000:6.0f} ms/bước | {result['train_images_per_second']:6.1f} ảnh/s huấn luyện, "
+                              f"{result['eval_images_per_second']:6.1f} ảnh/s suy luận | {result['hours_per_epoch']:.2f} giờ/epoch | "
+                              f"xung SM {result['sm_clock_mean_mhz']} MHz, {result['temperature_max_c']}°C", flush = True)
+                        if not result["within_memory_limit"]:
+                            break                                           # Vượt giới hạn: WSL / WDDM tràn sang RAM dùng chung, batch lớn hơn chỉ chậm hơn
 
     frame = pd.DataFrame(rows)
     args.output.parent.mkdir(parents = True, exist_ok = True)
@@ -151,5 +158,5 @@ if __name__ == "__main__":
     feasible = frame[~frame["oom"] & frame["within_memory_limit"].fillna(False).astype(bool)]
     if not feasible.empty:
         best = feasible.sort_values(["batch", "train_images_per_second"]).groupby(["mixer", "size"]).tail(1).sort_values(["mixer", "size"])
-        print(f"\nMicro-batch lớn nhất có VRAM reserved <= {MEMORY_LIMIT_GB} GB:")
-        print(best[["mixer", "size", "batch", "backbone_checkpoint", "peak_reserved_gb", "train_images_per_second", "hours_per_epoch"]].to_string(index = False))
+        print(f"\nMicro-batch lớn nhất có VRAM reserved <= {MEMORY_LIMIT_GB} GB (cùng batch: cấu hình checkpointing nhanh nhất):")
+        print(best[["mixer", "size", "batch", "block_checkpoint", "backbone_checkpoint", "peak_reserved_gb", "train_images_per_second", "hours_per_epoch"]].to_string(index = False))
