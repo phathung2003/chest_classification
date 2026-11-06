@@ -6,8 +6,8 @@ bootstrap; độ lệch chuẩn giữa các seed (biến thiên do huấn luyệ
 
 Ví dụ (H1 trên Validation: nhóm tổn thương khu trú L, M-clis so với M-ras, mọi seed đã chạy; mẫu * do script tự mở rộng):
     python analysis/compare_clis.py
-        --a "training_results/nih_chest_xray_14/clis_mamba_v1_m_clis_512px/run_*/fold_1/oof_predictions.csv"
-        --b "training_results/nih_chest_xray_14/clis_mamba_v1_m_ras_512px/run_*/fold_1/oof_predictions.csv"
+        --a "training_results/nih_chest_xray_14/clismamba_v1_m_clis_512px/run_*/fold_1/oof_predictions.csv"
+        --b "training_results/nih_chest_xray_14/clismamba_v1_m_ras_512px/run_*/fold_1/oof_predictions.csv"
         --name-a M-clis --name-b M-ras --output h1_validation.json
 
 Kết quả: hiệu macro AUROC (A - B) trên 14 nhãn, nhóm L, nhóm C và tương tác (ΔL - ΔC) theo cách chia chính (kiểm định H1, H1b),
