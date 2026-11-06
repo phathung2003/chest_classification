@@ -45,11 +45,18 @@ train_models/
 ├── analysis/
 │   ├── benchmark_clis.py         # VRAM đỉnh / thời gian một bước theo độ phân giải và micro-batch (cổng G0, E5)
 │   ├── compare_clis.py           # So sánh ghép cặp: trung bình qua seed, bootstrap theo bệnh nhân, nhóm L / C, tương tác ΔL - ΔC
+│   ├── compare_resolution.py     # Kiểm định H2 (E4): lợi thế của SSM so với GatedConv theo độ dài chuỗi
+│   ├── evaluate_locked.py        # Chấm checkpoint đã khóa trên Test một lần ở cổng G3; kiểm chứng đường chấm trên Validation
 │   └── laterality/               # Bằng chứng phân nhóm L / C (PPV, ChestX-Det, Open-i), kết quả kèm SHA-256
+│
+├── prereg/
+│   ├── analysis_plan.md          # Kế hoạch phân tích đăng ký trước của nghiên cứu CLIS (tag prereg-v1): giả thuyết, cổng, kịch bản
+│   └── lr_tuning_protocol.md     # Quy trình và kết quả chọn hệ số LR lớp mới m*
 │
 ├── tests/
 │   ├── test_clis_mamba.py        # Cổng G0: hoán vị, kernel selective scan khớp bản tham chiếu, độc lập giữa các tuyến, số tham số, CAM, checkpointing
-│   └── test_clis_protocol.py     # RLE CheXmask, căn đường giữa, không lật ngang, lịch LR warmup + cosine, nhóm không weight decay
+│   ├── test_clis_protocol.py     # RLE CheXmask, căn đường giữa, không lật ngang, lịch LR warmup + cosine, nhóm không weight decay
+│   └── test_clis_analysis.py     # Kết luận H2, chọn tệp dự đoán theo seed, khóa Test ở cổng G3
 │
 ├── training/                     # Quy trình huấn luyện và đánh giá
 │   ├── experiment.py             # start_train(): điều phối toàn bộ thí nghiệm K-Fold
@@ -301,4 +308,9 @@ python models/run_clis.py m_clis m_rand m_ras gatedconv attn flipdiff --seeds 42
 python preprocess/align_midline.py 1024 --chexmask <CheXmask>/OriginalResolution/ChestX-Ray8.csv   # Bộ ảnh 1024 px đã căn cho R*
 python models/run_clis.py m_clis m_rand m_ras --seeds 42 43 44 --init-from-size 512 --lr 5e-5 --set IMAGE_SIZE=1024 BATCH_SIZE=4 GRAD_ACCUM_STEPS=8 EPOCHS=5   # E3 ở R* = 1024 px
 python analysis/compare_clis.py --a "<m_clis>/run_*/fold_1/oof_predictions.csv" --b "<m_ras>/run_*/fold_1/oof_predictions.csv" --name-a M-clis --name-b M-ras
+python analysis/compare_resolution.py --ssm "<m_ras {size}px>/run_*/fold_1/oof_predictions.csv" --control "<gatedconv {size}px>/run_*/fold_1/oof_predictions.csv" --name-ssm M-ras   # H2 (E4)
+python analysis/evaluate_locked.py --runs "<lượt chạy>" --split validation --limit 256           # Kiểm chứng đường chấm, không mở Test
+python analysis/evaluate_locked.py --runs "<mọi lượt đã khóa>" --split test --confirm-g3         # Cổng G3: chấm Test một lần, cần tag prereg-v1
 ```
+
+Không bật `EVALUATE_FOLD_MODELS_ON_TEST` để chấm Test: cờ này nằm trong chữ ký thí nghiệm nên sẽ tạo lượt chạy mới và huấn luyện lại. Giả thuyết, cổng quyết định và kịch bản diễn giải nằm trong [prereg/analysis_plan.md](prereg/analysis_plan.md).
