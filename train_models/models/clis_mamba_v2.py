@@ -1,0 +1,221 @@
+# Khai báo utilities
+import sys
+import os
+from pathlib import Path
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
+# Khai báo thư viện
+import math
+
+import timm
+import torch
+import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
+
+import config
+import models.clis_mamba as clis
+import models.convnext_tiny as convnext
+from utilities.file import load_torch
+
+# ============================================================
+# CLIS-Mamba v2: Khối SS2D chèn vào ConvNeXt-T đầy đủ (Inserted SSM blocks)
+# Mục tiêu: Mô hình đề xuất = baseline ConvNeXt-T + đúng một thay đổi (các khối trộn token chèn giữa stage 3 và stage 4), nên mọi chênh lệch so với baseline quy được cho các khối chèn
+# ** v1 bỏ stage 4 tiền huấn luyện (15,5 triệu tham số ImageNet, 56% backbone) và buộc LR đầu phân loại theo LR khối mới (họ CLIS chọn x2, ConvNeXt-T chọn x40); v2 giữ cả hai như baseline
+# ** Không sửa models/clis_mamba.py: tệp đó được hash vào chữ ký các lượt v1. v2 chỉ dùng lại các thành phần (hoán vị, SS2D, bộ trộn đối chứng, mã hóa vị trí)
+#
+# Kiến trúc:
+#   1. ConvNeXt-T (ImageNet-1k, timm): stem --> stage 1-3: (b, 384, R / 16, R / 16)
+#   2. depth khối MetaFormer chèn, mỗi khối: x + γ1 ⊙ mixer(LN(x) + PE), rồi x + γ2 ⊙ MLP(LN(x)). γ khởi tạo 1e-6 (LayerScale như ConvNeXt),
+#      PE (hàng + cột) chỉ đi vào nhánh trộn: ở bước 0 mô hình trùng ConvNeXt-T (sai khác cỡ 1e-6)
+#   3. Stage 4 ConvNeXt-T --> đầu timm (pooling trung bình --> LayerNorm) --> Linear 14 lớp: giống hệt models/convnext_tiny.py
+#
+# Bảng tuyến SS2D: Mọi biến thể giữ đủ quét chéo hàng ±, cột ± của VMamba. M-clis / M-rand thêm 2 tuyến ghép cặp (cặp gương CLIS / cặp ngẫu nhiên),
+# nên H1 (M-clis so với M-rand) chỉ khác cách ghép cặp và không còn lẫn với việc mất quét cột như v1 (v1: M-clis thay 2 tuyến cột bằng 2 tuyến CLIS)
+#
+# Nhóm LR: Khối chèn học cùng LR backbone (PRETRAINED_MODULES gồm "inserted"); đầu phân loại là nhóm lớp mới với hệ số m* của ConvNeXt-T (x40, models/run_clis_v2.py).
+# Cấu hình tối ưu vì vậy giống hệt baseline, không tinh chỉnh LR mới
+#
+# Biến thể (tên dùng ở models/run_clis_v2.py):
+#   convnext_t                     : Không chèn khối = đúng ConvNeXt-T baseline (dùng để tinh chỉnh baseline 512 px --> 1024 px từ checkpoint E1)
+#   m_clis / m_rand / m_ras        : SS2D 6 / 6 / 4 tuyến
+#   gatedconv / attn / flipdiff    : Đối chứng không SSM, khớp số tham số với SS2D 4 tuyến như v1 (Gated CNN, self-attention, Gated CNN + |F - lật ngang(F)|)
+
+DIM = clis.DIM                                  # Số kênh ConvNeXt-T sau stage 3 (stride 16): 384
+LAYER_SCALE_INIT = 1e-6                         # γ khởi tạo của khối chèn (giá trị ConvNeXt dùng cho khối của chính nó)
+
+
+# ============================================================
+# Quét chéo của VMamba: hàng xuôi, hàng ngược, cột xuôi, cột ngược
+def cross_scan(h, w):
+    raster, column = clis.perm_raster(h, w), clis.perm_column(h, w)
+    return [raster, raster.flip(0), column, column.flip(0)]
+
+
+# Bảng tuyến của từng biến thể SS2D (tuyến k luôn dùng tham số x_proj / dt / A / D thứ k)
+ROUTES = {
+    "m_ras"     : lambda h, w: cross_scan(h, w),
+    "m_clis"    : lambda h, w: cross_scan(h, w) + [clis.perm_clis(h, w), clis.perm_clis(h, w).flip(0)],
+    "m_rand"    : lambda h, w: cross_scan(h, w) + [clis.perm_random_pair(h, w), clis.perm_random_pair(h, w).flip(0)],
+}
+MIXERS = (*ROUTES, "gatedconv", "attn", "flipdiff")
+NAMES = ("convnext_t", *MIXERS)
+
+
+# ============================================================
+# Tên mô hình theo biến thể và độ phân giải (mặc định IMAGE_SIZE; dùng làm tên thư mục kết quả).
+# convnext_t dùng đúng tên baseline E1 nên lượt 1024 px nằm cạnh lượt 512 px của baseline
+def model_name(name, size = None):
+    size = size or config.IMAGE_SIZE
+    return f"{convnext.MODEL_NAME} CLIS {size}px" if name == "convnext_t" else f"CLIS-Mamba v2 {name} {size}px"
+
+
+# ============================================================
+# SS2D đa tuyến của v1 với số tuyến bằng số hoán vị trong bảng tuyến v2 (4 hoặc 6). Phép tính (scan_routes, forward) giữ nguyên v1
+class MultiRouteSS2D(clis.MultiRouteSS2D):
+    def __init__(self, dim, routes = "m_clis", d_state = 16, dt_rank = None):
+        nn.Module.__init__(self)
+
+        # Kiểm tra bảng tuyến
+        if routes not in ROUTES:
+            raise ValueError(f"Bảng tuyến '{routes}' không hợp lệ: {list(ROUTES)}")
+
+        # Số tuyến, số trạng thái, hạng của dt
+        self.routes, self.k, self.n = routes, len(ROUTES[routes](2, 2)), d_state
+        self.r = dt_rank or math.ceil(dim / 16)
+
+        # Tham số: giống v1, chiều tuyến có self.k phần tử
+        self.in_proj = nn.Linear(dim, 2 * dim, bias = False)
+        self.conv = nn.Conv2d(dim, dim, 3, padding = 1, groups = dim)
+        self.x_proj = nn.Parameter(torch.empty(self.k, self.r + 2 * d_state, dim).uniform_(-dim ** -0.5, dim ** -0.5))
+        self.dt_proj = nn.Parameter(torch.empty(self.k, dim, self.r).uniform_(-self.r ** -0.5, self.r ** -0.5))
+        self.dt_bias = nn.Parameter(clis.dt_bias_init(self.k * dim))
+        self.A_log = nn.Parameter(torch.log(torch.arange(1, d_state + 1, dtype = torch.float32)).repeat(self.k * dim, 1))   # A = -[1..n] (S4D-real)
+        self.D = nn.Parameter(torch.ones(self.k * dim))
+        self.norm = nn.LayerNorm(dim)
+        self.out_proj = nn.Linear(dim, dim, bias = False)
+        self._orders = {}
+
+    # Bảng hoán vị (k, l) và hoán vị ngược của lưới h x w theo bảng tuyến v2 (tạo một lần cho mỗi kích thước lưới)
+    # Trả về: (order, inverse)
+    def orders(self, h, w, device):
+        key = (h, w, str(device))
+        if key not in self._orders:
+            order = torch.stack(ROUTES[self.routes](h, w)).to(device)
+            self._orders[key] = (order, torch.argsort(order, dim = 1))
+        return self._orders[key]
+
+
+# Bộ trộn token theo tên: SS2D theo bảng tuyến v2; đối chứng không SSM lấy nguyên của v1 (khớp số tham số với SS2D 4 tuyến)
+# Trả về: nn.Module nhận / trả (b, h, w, d)
+def make_mixer(kind, dim, d_state):
+    if kind in ROUTES:
+        return MultiRouteSS2D(dim, kind, d_state)
+    if kind in ("gatedconv", "attn", "flipdiff"):
+        return clis.make_mixer(kind, dim, d_state)
+    raise ValueError(f"Bộ trộn '{kind}' không hợp lệ: {list(MIXERS)}")
+
+
+# ============================================================
+# Khối MetaFormer chèn: hai phần dư có LayerScale; mã hóa vị trí chỉ cộng vào đầu vào của bộ trộn (không vào dòng chính)
+class Block(nn.Module):
+    def __init__(self, dim, mixer, mlp_ratio = 2.0, layer_scale = LAYER_SCALE_INIT):
+        super().__init__()
+        hidden = int(dim * mlp_ratio)
+        self.norm1, self.mixer = nn.LayerNorm(dim), mixer
+        self.norm2, self.mlp = nn.LayerNorm(dim), nn.Sequential(nn.Linear(dim, hidden), nn.GELU(), nn.Linear(hidden, dim))
+        self.gamma1 = nn.Parameter(torch.full((dim,), float(layer_scale)))         # LayerScale của nhánh trộn token
+        self.gamma2 = nn.Parameter(torch.full((dim,), float(layer_scale)))         # LayerScale của nhánh MLP
+
+    def forward(self, x, position):                                                 # x: (b, h, w, d) | position: (1, h, w, d)
+        x = x + self.gamma1 * self.mixer(self.norm1(x) + position)
+        return x + self.gamma2 * self.mlp(self.norm2(x))
+
+
+# Chuỗi khối chèn giữa hai stage ConvNeXt: nhận / trả bản đồ đặc trưng (b, d, h, w) như một stage
+class InsertedBlocks(nn.Module):
+    def __init__(self, dim, mixer, depth, d_state, mlp_ratio, layer_scale, grad_checkpoint):
+        super().__init__()
+        self.pe = clis.RowColPE(dim)
+        self.blocks = nn.ModuleList([Block(dim, make_mixer(mixer, dim, d_state), mlp_ratio, layer_scale) for _ in range(depth)])
+        self.grad_checkpoint = grad_checkpoint
+
+    def forward(self, x):
+
+        # Chuyển sang channels-last cho bộ trộn; bảng mã hóa vị trí (1, h, w, d) nội suy theo lưới thực tế
+        x = x.permute(0, 2, 3, 1)
+        position = self.pe(x.new_zeros(1, *x.shape[1:]))
+
+        # Các khối (gradient checkpointing từng khối khi huấn luyện: cùng phép tính, chỉ đổi VRAM / tốc độ)
+        for block in self.blocks:
+            x = checkpoint(block, x, position, use_reentrant = False) if self.grad_checkpoint and self.training and torch.is_grad_enabled() else block(x, position)
+        return x.permute(0, 3, 1, 2)
+
+
+# ============================================================
+# Mô hình đầy đủ (mixer = "convnext_t": không chèn khối, đúng ConvNeXt-T baseline)
+class CLISMambaV2(nn.Module):
+    def __init__(self, num_classes, mixer = "m_clis", depth = 4, d_state = 16, mlp_ratio = 2.0, layer_scale = LAYER_SCALE_INIT,
+                 grad_checkpoint = True, backbone_checkpoint = False, pretrained = True, init_from = None):
+        super().__init__()
+
+        # Kiểm tra biến thể
+        if mixer not in NAMES:
+            raise ValueError(f"Biến thể '{mixer}' không hợp lệ: {list(NAMES)}")
+        self.mixer = mixer
+
+        # 1. Backbone + đầu phân loại tạo theo đúng thứ tự của baseline (cùng seed --> cùng trọng số khởi tạo đầu phân loại)
+        self.cnn = timm.create_model("convnext_tiny.fb_in1k", pretrained = pretrained and init_from is None, num_classes = 0)
+        self.classifier = nn.Linear(self.cnn.num_features, num_classes)
+        self.cnn.set_grad_checkpointing(backbone_checkpoint)
+
+        # 2. Khối chèn giữa stage 3 và stage 4 (tạo sau đầu phân loại)
+        self.inserted = None if mixer == "convnext_t" else InsertedBlocks(DIM, mixer, depth, d_state, mlp_ratio, layer_scale, grad_checkpoint)
+
+        # 3. Nhóm LR backbone (training/optimizer.py): backbone ImageNet và khối chèn; còn lại (đầu phân loại) là nhóm lớp mới
+        self.PRETRAINED_MODULES = ("cnn",) if self.inserted is None else ("cnn", "inserted")
+
+        # 4. Khởi tạo từ best_model.pt cùng biến thể (ví dụ 512 px, trước khi tinh chỉnh ở 1024 px); checkpoint baseline E1 (models/convnext_tiny.py) không có khóa mixer
+        if init_from is not None:
+            saved = load_torch(init_from)
+            saved_mixer = saved["model_kwargs"].get("mixer", "convnext_t")
+            if saved_mixer != mixer:
+                raise ValueError(f"{init_from} là checkpoint của biến thể {saved_mixer}, không phải {mixer}")
+            self.load_state_dict(saved["model_state_dict"])
+
+    # Tham số không áp dụng weight decay (quy ước timm): mã hóa vị trí và tham số SSM (A_log, D, dt_bias) như Mamba / VMamba.
+    # γ LayerScale, bias, norm là tham số 1 chiều: no_weight_decay_1d của CLIS_PROTOCOL đã bỏ decay
+    def no_weight_decay(self):
+        return {name for name, _ in self.named_parameters() if name.startswith("inserted.pe.") or name.rsplit(".", 1)[-1] in ("A_log", "D", "dt_bias")}
+
+    # Bản đồ đặc trưng sau stage 4 (trước pooling)
+    # Trả về: (b, 768, R / 32, R / 32)
+    def features(self, x):
+        x = self.cnn.stem(x)
+        x = self.cnn.stages[0](x)
+        x = self.cnn.stages[1](x)
+        x = self.cnn.stages[2](x)
+        if self.inserted is not None:
+            x = self.inserted(x)
+        x = self.cnn.stages[3](x)
+        return self.cnn.norm_pre(x)
+
+    def forward(self, x):
+        return self.classifier(self.cnn.forward_head(self.features(x)))
+
+    # Độ lớn trung bình |γ| của từng khối chèn (nhánh trộn, nhánh MLP): khối chèn có thật sự được dùng hay vẫn gần đồng nhất
+    # Trả về: Danh sách (|γ1|, |γ2|) theo khối; rỗng nếu không chèn
+    def layer_scales(self):
+        if self.inserted is None:
+            return []
+        return [(block.gamma1.detach().abs().mean().item(), block.gamma2.detach().abs().mean().item()) for block in self.inserted.blocks]
+
+    # FLOPs của phần quét selective scan cho một ảnh, cùng quy ước với v1 (utilities/tracking.py cộng vào tổng FLOPs)
+    def uncounted_flops(self, height, width):
+        if self.inserted is None:
+            return 0
+        tokens = (height // 16) * (width // 16)
+        return sum(9 * tokens * block.mixer.k * DIM * block.mixer.n for block in self.inserted.blocks if isinstance(block.mixer, clis.MultiRouteSS2D))
