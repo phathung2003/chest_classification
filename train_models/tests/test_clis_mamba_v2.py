@@ -61,24 +61,22 @@ def test_convnext_t_equals_baseline():
     x = torch.randn(2, 3, SIZE, SIZE)
     with torch.no_grad():
         assert torch.equal(new(x), old(x))
-    assert new.PRETRAINED_MODULES == ("cnn",) and new.layer_scales() == [] and new.uncounted_flops(512, 512) == 0
+    assert new.PRETRAINED_MODULES == ("cnn",) and new.engagement() == [] and new.uncounted_flops(512, 512) == 0
 
 
-# Khối chèn ở bước 0: γ = 0 cho đúng đầu ra baseline; γ = 1e-6 (mặc định) lệch rất nhỏ
+# Khối chèn ở bước 0 (mặc định: khởi tạo 0 phép chiếu ra): đầu ra trùng tuyệt đối baseline với mọi bộ trộn; cách cũ LayerScale chỉ gần trùng
 def test_identity_at_init():
     x = torch.randn(2, 3, SIZE, SIZE)
-    for mixer in ("m_clis", "gatedconv", "attn"):
+    for mixer in ("m_clis", "m_ras", "gatedconv", "attn", "flipdiff"):
         old = baseline().eval()
-        exact = make(mixer, layer_scale = 0.0).eval()
-        assert torch.equal(exact.classifier.weight, old.classifier.weight)
-        old.load_state_dict({key: value for key, value in exact.state_dict().items() if not key.startswith("inserted.")})
-        default = make(mixer).eval()
-        default.load_state_dict(exact.state_dict() | {key: value for key, value in default.state_dict().items() if "gamma" in key})
+        new = make(mixer).eval()
+        assert torch.equal(new.classifier.weight, old.classifier.weight)
+        assert all(a == 0 and b == 0 for a, b in new.engagement()), f"{mixer}: phép chiếu ra phải bằng 0 lúc khởi tạo"
+        old.load_state_dict({key: value for key, value in new.state_dict().items() if not key.startswith("inserted.")})
         with torch.no_grad():
-            reference = old(x)
-            assert torch.equal(exact(x), reference), f"{mixer}: γ = 0 phải trùng baseline"
-            assert (default(x) - reference).abs().max() < 1e-3, f"{mixer}: γ = 1e-6 phải gần baseline"
-    assert all(abs(a - 1e-6) < 1e-12 and abs(b - 1e-6) < 1e-12 for a, b in make().layer_scales())
+            assert torch.equal(new(x), old(x)), f"{mixer}: phải trùng baseline ở bước 0"
+    legacy = make("m_clis", residual_init = "layerscale").eval()
+    assert any(name.endswith("gamma1") for name, _ in legacy.named_parameters()) and not any(name.endswith("gamma1") for name, _ in make("m_clis").named_parameters())
 
 
 # Nhóm LR: backbone và khối chèn dùng LR backbone; chỉ đầu phân loại nhân hệ số; tham số SSM và γ không decay
@@ -91,8 +89,9 @@ def test_parameter_groups():
     for name, parameter in model.named_parameters():
         expected = 4e-3 if name.startswith("classifier.") else 1e-4
         assert abs(rate[id(parameter)] - expected) < 1e-12, f"{name}: LR {rate[id(parameter)]}, cần {expected}"
-        if name.endswith(("A_log", "gamma1", "gamma2")) or name.startswith("inserted.pe."):
+        if name.endswith("A_log") or name.startswith("inserted.pe."):
             assert decay[id(parameter)] == 0.0, f"{name} không được decay"
+    assert decay[id(model.inserted.blocks[0].mixer.out_proj.weight)] != 0.0, "Phép chiếu ra (2 chiều) vẫn có weight decay (mặc định của optimizer)"
     assert sum(len(group["params"]) for group in groups) == len(list(model.parameters()))
 
 
@@ -113,15 +112,15 @@ def test_init_from():
     with tempfile.TemporaryDirectory() as directory:
         source = make("m_clis", seed = 1)
         path = Path(directory) / "best_model.pt"
-        torch.save({"model_kwargs": {"mixer": "m_clis"}, "model_state_dict": source.state_dict()}, path)
+        torch.save({"model_kwargs": {"mixer": "m_clis", "residual_init": "zero"}, "model_state_dict": source.state_dict()}, path)
         loaded = v2.CLISMambaV2(3, mixer = "m_clis", pretrained = False, depth = 2, d_state = 4, grad_checkpoint = False, init_from = str(path))
         assert all(torch.equal(a, b) for a, b in zip(loaded.state_dict().values(), source.state_dict().values()))
-        try:
-            v2.CLISMambaV2(3, mixer = "m_rand", pretrained = False, depth = 2, d_state = 4, init_from = str(path))
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("Phải từ chối checkpoint của biến thể khác")
+        for kwargs in ({"mixer": "m_rand"}, {"mixer": "m_clis", "residual_init": "layerscale"}):
+            try:
+                v2.CLISMambaV2(3, pretrained = False, depth = 2, d_state = 4, init_from = str(path), **kwargs)
+            except ValueError:
+                continue
+            raise AssertionError(f"Phải từ chối checkpoint khác biến thể hoặc khác cách khởi tạo: {kwargs}")
         old = baseline(seed = 2)
         torch.save({"model_kwargs": {}, "model_state_dict": old.state_dict()}, path)
         loaded = v2.CLISMambaV2(3, mixer = "convnext_t", pretrained = False, init_from = str(path))
@@ -135,8 +134,8 @@ def test_forward_backward():
         logits = model(torch.randn(2, 3, size, size))
         assert logits.shape == (2, 3)
     logits.sum().backward()
-    gammas = [p.grad for name, p in model.named_parameters() if "gamma" in name]
-    assert gammas and all(g is not None and g.abs().sum() > 0 for g in gammas), "γ phải nhận gradient"
+    projections = [layer.weight.grad for block in model.inserted.blocks for layer in (v2.output_projection(block.mixer), block.mlp[2])]
+    assert all(g is not None and g.abs().sum() > 0 for g in projections), "Phép chiếu ra (khởi tạo 0) phải nhận gradient ngay ở bước đầu"
     assert model.uncounted_flops(512, 512) == 2 * 9 * 32 * 32 * 6 * v2.DIM * 4
     assert "inserted.pe.row" in model.no_weight_decay() and "inserted.blocks.0.mixer.A_log" in model.no_weight_decay()
 
