@@ -40,6 +40,13 @@ from utilities.setting import apply_config, keep_system_awake
 #                                                                                       --> tinh chỉnh 1024 px từ best_model.pt 512 px cùng biến thể, cùng seed (convnext_t: checkpoint E1)
 QUEUE_LOG = config.MODELS_OUTPUT_DIRECTORY / "clis_v2_queue.log"
 HEAD_LR_MULTIPLIER = float(config.CLIS_LR_MULTIPLIER["convnext_t"])              # Hệ số LR đầu phân loại: m* đã tinh chỉnh của ConvNeXt-T
+RESIDUAL_INIT = "zero"                                                             # Khởi tạo phần dư của khối chèn; lượt LayerScale (thiếu khóa này trong model_kwargs) bị loại khỏi mọi tìm kiếm
+
+
+# Lượt chạy có đúng cách khởi tạo phần dư hiện hành không (convnext_t không có khối chèn nên luôn đúng)
+# Trả về: bool
+def current_init(name, model_kwargs):
+    return name == "convnext_t" or model_kwargs.get("residual_init") == RESIDUAL_INIT
 
 
 def log(message):
@@ -77,7 +84,7 @@ def find_checkpoint(name, seed, fold, size):
         settings = read_json(info_path).get("settings", {})
         optimizer = settings.get("training_config", {}).get("optimizer", {})
         if (settings.get("seed") == int(seed) and settings.get("image_size") == int(size)
-                and settings.get("model_kwargs", {}).get("mixer", "convnext_t") == name
+                and settings.get("model_kwargs", {}).get("mixer", "convnext_t") == name and current_init(name, settings.get("model_kwargs", {}))
                 and optimizer.get("new_module_lr_multiplier") == HEAD_LR_MULTIPLIER and optimizer.get("learning_rate") == learning_rate
                 and (info_path.parent / f"fold_{fold}" / "fold_done.json").is_file()):
             matches.append(info_path.parent / f"fold_{fold}" / "best_model.pt")
@@ -97,7 +104,7 @@ def find_fold_directory(name, seed, fold, overrides, learning_rate):
         snapshot = settings.get("config", {})
         optimizer = settings.get("training_config", {}).get("optimizer", {})
         if (settings.get("seed") == int(seed)
-                and settings.get("model_kwargs", {}).get("mixer", "convnext_t") == name
+                and settings.get("model_kwargs", {}).get("mixer", "convnext_t") == name and current_init(name, settings.get("model_kwargs", {}))
                 and optimizer.get("new_module_lr_multiplier") == HEAD_LR_MULTIPLIER
                 and optimizer.get("learning_rate") == float(learning_rate)
                 and all(snapshot.get(key) == value for key, value in overrides.items() if key in snapshot)):
@@ -119,9 +126,10 @@ def run_child(name, seed, fold, overrides, lr = None, init_from_size = None):
     if lr is not None:
         protocol["optimizer_config"]["learning_rate"] = float(lr)
 
-    # Tham số mô hình: checkpointing khối chèn theo BLOCK_GRAD_CHECKPOINT (convnext_t không có khối chèn)
+    # Tham số mô hình: khởi tạo 0 phép chiếu ra của khối chèn (ghi rõ vào chữ ký), checkpointing khối chèn theo BLOCK_GRAD_CHECKPOINT (convnext_t không có khối chèn)
     kwargs = {"mixer": name}
     if name != "convnext_t":
+        kwargs["residual_init"] = RESIDUAL_INIT
         kwargs["grad_checkpoint"] = bool(config.BLOCK_GRAD_CHECKPOINT)
     if init_from_size is not None:
         kwargs["init_from"] = str(find_checkpoint(name, seed, fold, init_from_size))
@@ -134,15 +142,17 @@ def run_child(name, seed, fold, overrides, lr = None, init_from_size = None):
     return start_train(model_name = model_name, dataset_class = NIHChestXrayDataset, model_factory = v2.CLISMambaV2, model_kwargs = kwargs, **protocol)
 
 
-# |γ| trung bình của khối chèn trong best_model.pt (khối có được dùng không); None nếu không đọc được
+# Mức tham gia của khối chèn trong best_model.pt: trung bình |trọng số| phép chiếu ra của nhánh trộn / nhánh MLP (0 lúc khởi tạo); None nếu không đọc được
 # Trả về: Chuỗi mô tả hoặc None
-def describe_layer_scales(fold_directory):
+def describe_engagement(fold_directory):
     try:
         state = load_torch(fold_directory / "best_model.pt")["model_state_dict"]
-        values = [(state[f"inserted.blocks.{index}.gamma1"].abs().mean().item(), state[f"inserted.blocks.{index}.gamma2"].abs().mean().item())
-                  for index in range(len({key.split(".")[2] for key in state if key.startswith("inserted.blocks.")}))]
+        values = []
+        for index in range(len({key.split(".")[2] for key in state if key.startswith("inserted.blocks.")})):
+            mixer = next(state[f"inserted.blocks.{index}.mixer.{name}.weight"] for name in ("out_proj", "fc2", "proj") if f"inserted.blocks.{index}.mixer.{name}.weight" in state)
+            values.append((mixer.abs().mean().item(), state[f"inserted.blocks.{index}.mlp.2.weight"].abs().mean().item()))
         return " ".join(f"k{index + 1} {mixer:.3g}/{mlp:.3g}" for index, (mixer, mlp) in enumerate(values)) if values else None
-    except (OSError, KeyError, RuntimeError):
+    except (OSError, KeyError, RuntimeError, StopIteration):
         return None
 
 
@@ -228,16 +238,16 @@ if __name__ == "__main__":
             failed.append((name, seed))
             continue
 
-        # Điểm Validation tốt nhất của lượt vừa xong, kèm |γ| của khối chèn
+        # Điểm Validation tốt nhất của lượt vừa xong, kèm mức tham gia của khối chèn
         fold_directory = find_fold_directory(name, seed, args.fold, overrides, learning_rate)
         score = None if fold_directory is None else history_score(fold_directory, selection_metric)
         if score is None or not score["finished"]:
             failed.append((name, seed, "không đọc được điểm"))
             continue
         scores.setdefault(name, {})[seed] = score["best_score"]
-        scales = None if name == "convnext_t" else describe_layer_scales(fold_directory)
+        engagement = None if name == "convnext_t" else describe_engagement(fold_directory)
         log(f"ĐIỂM {name} | seed {seed} | Validation {selection_metric} {score['best_score']:.4f} ở epoch {score['best_epoch']} | {fold_directory.parent.name}"
-            + ("" if scales is None else f" | |γ| trộn/MLP {scales}"))
+            + ("" if engagement is None else f" | |W chiếu ra| trộn/MLP {engagement}"))
 
     # Tổng kết theo biến thể: trung bình ± độ lệch chuẩn qua seed; cổng --min-score xét điểm trung bình
     below = []

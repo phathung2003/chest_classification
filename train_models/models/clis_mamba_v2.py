@@ -29,9 +29,14 @@ from utilities.file import load_torch
 #
 # Kiến trúc:
 #   1. ConvNeXt-T (ImageNet-1k, timm): stem --> stage 1-3: (b, 384, R / 16, R / 16)
-#   2. depth khối MetaFormer chèn, mỗi khối: x + γ1 ⊙ mixer(LN(x) + PE), rồi x + γ2 ⊙ MLP(LN(x)). γ khởi tạo 1e-6 (LayerScale như ConvNeXt),
-#      PE (hàng + cột) chỉ đi vào nhánh trộn: ở bước 0 mô hình trùng ConvNeXt-T (sai khác cỡ 1e-6)
+#   2. depth khối MetaFormer chèn, mỗi khối: x + mixer(LN(x) + PE), rồi x + MLP(LN(x)). Phép chiếu ra cuối của bộ trộn và của MLP khởi tạo bằng 0
+#      (như Non-local Networks, ControlNet), PE (hàng + cột) chỉ đi vào nhánh trộn: ở bước 0 mô hình trùng tuyệt đối ConvNeXt-T
 #   3. Stage 4 ConvNeXt-T --> đầu timm (pooling trung bình --> LayerNorm) --> Linear 14 lớp: giống hệt models/convnext_tiny.py
+#
+# ** Không dùng LayerScale γ = 1e-6: dòng đặc trưng sau stage 3 có độ lệch chuẩn khoảng 44 còn nhánh chỉ khoảng 0,07, nên sau 1 epoch (lượt ngày 2026-11-07)
+#    γ chỉ đạt 1e-4 và khối chèn đóng góp cỡ 1e-6 so với dòng chính: gradient của γ (vô hướng theo kênh) đổi dấu do nhánh còn ngẫu nhiên, gradient của
+#    trọng số bên trong bị γ nhân nhỏ dưới eps của Adam. Khởi tạo 0 phép chiếu ra cho gradient có hướng ngay từ bước đầu (đọc ra tuyến tính từ đặc trưng nhánh).
+#    residual_init = "layerscale" giữ lại cách cũ chỉ để tái lập lượt đã bỏ
 #
 # Bảng tuyến SS2D: Mọi biến thể giữ đủ quét chéo hàng ±, cột ± của VMamba. M-clis / M-rand thêm 2 tuyến ghép cặp (cặp gương CLIS / cặp ngẫu nhiên),
 # nên H1 (M-clis so với M-rand) chỉ khác cách ghép cặp và không còn lẫn với việc mất quét cột như v1 (v1: M-clis thay 2 tuyến cột bằng 2 tuyến CLIS)
@@ -45,7 +50,8 @@ from utilities.file import load_torch
 #   gatedconv / attn / flipdiff    : Đối chứng không SSM, khớp số tham số với SS2D 4 tuyến như v1 (Gated CNN, self-attention, Gated CNN + |F - lật ngang(F)|)
 
 DIM = clis.DIM                                  # Số kênh ConvNeXt-T sau stage 3 (stride 16): 384
-LAYER_SCALE_INIT = 1e-6                         # γ khởi tạo của khối chèn (giá trị ConvNeXt dùng cho khối của chính nó)
+LAYER_SCALE_INIT = 1e-6                         # γ khởi tạo của cách cũ residual_init = "layerscale" (đã bỏ, xem đầu tệp)
+RESIDUAL_INITS = ("zero", "layerscale")         # Cách khởi tạo phần dư của khối chèn; mặc định "zero"
 
 
 # ============================================================
@@ -119,28 +125,56 @@ def make_mixer(kind, dim, d_state):
     raise ValueError(f"Bộ trộn '{kind}' không hợp lệ: {list(MIXERS)}")
 
 
+# Phép chiếu ra cuối của một bộ trộn (Linear cuối trước khi cộng vào phần dư)
+# Trả về: nn.Linear
+def output_projection(mixer):
+    for name in ("out_proj", "fc2", "proj"):                                        # SS2D | GatedConv, FlipDiff | Attention
+        if isinstance(getattr(mixer, name, None), nn.Linear):
+            return getattr(mixer, name)
+    raise TypeError(f"Không tìm thấy phép chiếu ra của {type(mixer).__name__}")
+
+
 # ============================================================
-# Khối MetaFormer chèn: hai phần dư có LayerScale; mã hóa vị trí chỉ cộng vào đầu vào của bộ trộn (không vào dòng chính)
+# Khối MetaFormer chèn; mã hóa vị trí chỉ cộng vào đầu vào của bộ trộn (không vào dòng chính)
+#   residual_init = "zero"       : Phép chiếu ra của bộ trộn và Linear cuối của MLP khởi tạo bằng 0 --> khối là phép đồng nhất ở bước 0
+#   residual_init = "layerscale" : Cách cũ (đã bỏ): hai phần dư nhân LayerScale γ khởi tạo LAYER_SCALE_INIT
 class Block(nn.Module):
-    def __init__(self, dim, mixer, mlp_ratio = 2.0, layer_scale = LAYER_SCALE_INIT):
+    def __init__(self, dim, mixer, mlp_ratio = 2.0, residual_init = "zero"):
         super().__init__()
+
+        # Kiểm tra cách khởi tạo
+        if residual_init not in RESIDUAL_INITS:
+            raise ValueError(f"residual_init '{residual_init}' không hợp lệ: {list(RESIDUAL_INITS)}")
+
+        # Nhánh trộn token và nhánh MLP
         hidden = int(dim * mlp_ratio)
         self.norm1, self.mixer = nn.LayerNorm(dim), mixer
         self.norm2, self.mlp = nn.LayerNorm(dim), nn.Sequential(nn.Linear(dim, hidden), nn.GELU(), nn.Linear(hidden, dim))
-        self.gamma1 = nn.Parameter(torch.full((dim,), float(layer_scale)))         # LayerScale của nhánh trộn token
-        self.gamma2 = nn.Parameter(torch.full((dim,), float(layer_scale)))         # LayerScale của nhánh MLP
+
+        # Khởi tạo phần dư
+        self.layer_scale = residual_init == "layerscale"
+        if self.layer_scale:
+            self.gamma1 = nn.Parameter(torch.full((dim,), LAYER_SCALE_INIT))      # LayerScale của nhánh trộn token
+            self.gamma2 = nn.Parameter(torch.full((dim,), LAYER_SCALE_INIT))      # LayerScale của nhánh MLP
+        else:
+            for layer in (output_projection(self.mixer), self.mlp[2]):
+                nn.init.zeros_(layer.weight)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
 
     def forward(self, x, position):                                                 # x: (b, h, w, d) | position: (1, h, w, d)
-        x = x + self.gamma1 * self.mixer(self.norm1(x) + position)
-        return x + self.gamma2 * self.mlp(self.norm2(x))
+        mixed = self.mixer(self.norm1(x) + position)
+        x = x + (self.gamma1 * mixed if self.layer_scale else mixed)
+        fed = self.mlp(self.norm2(x))
+        return x + (self.gamma2 * fed if self.layer_scale else fed)
 
 
 # Chuỗi khối chèn giữa hai stage ConvNeXt: nhận / trả bản đồ đặc trưng (b, d, h, w) như một stage
 class InsertedBlocks(nn.Module):
-    def __init__(self, dim, mixer, depth, d_state, mlp_ratio, layer_scale, grad_checkpoint):
+    def __init__(self, dim, mixer, depth, d_state, mlp_ratio, residual_init, grad_checkpoint):
         super().__init__()
         self.pe = clis.RowColPE(dim)
-        self.blocks = nn.ModuleList([Block(dim, make_mixer(mixer, dim, d_state), mlp_ratio, layer_scale) for _ in range(depth)])
+        self.blocks = nn.ModuleList([Block(dim, make_mixer(mixer, dim, d_state), mlp_ratio, residual_init) for _ in range(depth)])
         self.grad_checkpoint = grad_checkpoint
 
     def forward(self, x):
@@ -158,7 +192,7 @@ class InsertedBlocks(nn.Module):
 # ============================================================
 # Mô hình đầy đủ (mixer = "convnext_t": không chèn khối, đúng ConvNeXt-T baseline)
 class CLISMambaV2(nn.Module):
-    def __init__(self, num_classes, mixer = "m_clis", depth = 4, d_state = 16, mlp_ratio = 2.0, layer_scale = LAYER_SCALE_INIT,
+    def __init__(self, num_classes, mixer = "m_clis", depth = 4, d_state = 16, mlp_ratio = 2.0, residual_init = "zero",
                  grad_checkpoint = True, backbone_checkpoint = False, pretrained = True, init_from = None):
         super().__init__()
 
@@ -173,7 +207,7 @@ class CLISMambaV2(nn.Module):
         self.cnn.set_grad_checkpointing(backbone_checkpoint)
 
         # 2. Khối chèn giữa stage 3 và stage 4 (tạo sau đầu phân loại)
-        self.inserted = None if mixer == "convnext_t" else InsertedBlocks(DIM, mixer, depth, d_state, mlp_ratio, layer_scale, grad_checkpoint)
+        self.inserted = None if mixer == "convnext_t" else InsertedBlocks(DIM, mixer, depth, d_state, mlp_ratio, residual_init, grad_checkpoint)
 
         # 3. Nhóm LR backbone (training/optimizer.py): backbone ImageNet và khối chèn; còn lại (đầu phân loại) là nhóm lớp mới
         self.PRETRAINED_MODULES = ("cnn",) if self.inserted is None else ("cnn", "inserted")
@@ -184,6 +218,8 @@ class CLISMambaV2(nn.Module):
             saved_mixer = saved["model_kwargs"].get("mixer", "convnext_t")
             if saved_mixer != mixer:
                 raise ValueError(f"{init_from} là checkpoint của biến thể {saved_mixer}, không phải {mixer}")
+            if self.inserted is not None and saved["model_kwargs"].get("residual_init", "layerscale") != residual_init:
+                raise ValueError(f"{init_from} dùng cách khởi tạo phần dư khác {residual_init}")
             self.load_state_dict(saved["model_state_dict"])
 
     # Tham số không áp dụng weight decay (quy ước timm): mã hóa vị trí và tham số SSM (A_log, D, dt_bias) như Mamba / VMamba.
@@ -206,12 +242,12 @@ class CLISMambaV2(nn.Module):
     def forward(self, x):
         return self.classifier(self.cnn.forward_head(self.features(x)))
 
-    # Độ lớn trung bình |γ| của từng khối chèn (nhánh trộn, nhánh MLP): khối chèn có thật sự được dùng hay vẫn gần đồng nhất
-    # Trả về: Danh sách (|γ1|, |γ2|) theo khối; rỗng nếu không chèn
-    def layer_scales(self):
+    # Mức tham gia của từng khối chèn: trung bình |trọng số| của phép chiếu ra nhánh trộn và nhánh MLP (bằng 0 ở bước 0 với residual_init "zero")
+    # Trả về: Danh sách (nhánh trộn, nhánh MLP) theo khối; rỗng nếu không chèn
+    def engagement(self):
         if self.inserted is None:
             return []
-        return [(block.gamma1.detach().abs().mean().item(), block.gamma2.detach().abs().mean().item()) for block in self.inserted.blocks]
+        return [(output_projection(block.mixer).weight.detach().abs().mean().item(), block.mlp[2].weight.detach().abs().mean().item()) for block in self.inserted.blocks]
 
     # FLOPs của phần quét selective scan cho một ảnh, cùng quy ước với v1 (utilities/tracking.py cộng vào tổng FLOPs)
     def uncounted_flops(self, height, width):
