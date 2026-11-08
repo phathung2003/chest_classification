@@ -17,10 +17,13 @@ import copy
 import subprocess
 import time
 
+import pandas as pd
+
 import config
 import models.clis_mamba_v2 as v2
-from models.run_clis import GATE_EXIT, history_score, seed_summary
+from models.run_clis import GATE_EXIT, PAUSED_EXIT, history_score, seed_summary
 from training.experiment import start_train
+from training.train import TrainingPaused
 from utilities.dataset import NIHChestXrayDataset
 from utilities.environment import check_environment
 from utilities.file import load_torch, read_json, to_snake_case
@@ -38,6 +41,13 @@ from utilities.setting import apply_config, keep_system_awake
 #   python models/run_clis_v2.py m_clis --seeds 42 --min-score 0.85                     --> cổng: mã thoát 3 nếu macro AUROC Validation trung bình < 0.85
 #   python models/run_clis_v2.py convnext_t m_clis --seeds 42 --init-from-size 512 --lr 5e-5 --set IMAGE_SIZE=1024 BATCH_SIZE=4 GRAD_ACCUM_STEPS=8 EPOCHS=5 BLOCK_GRAD_CHECKPOINT=True
 #                                                                                       --> tinh chỉnh 1024 px từ best_model.pt 512 px cùng biến thể, cùng seed (convnext_t: checkpoint E1)
+#
+# Pilot khối chèn 2026-11-08 (thư mục kết quả có hậu tố riêng nên không lẫn với lượt thường):
+#   --block-lr 10                     --> LR khối chèn = 10 x LR backbone (tham số hóa lại trong mô hình, hậu tố " blr10")
+#   --freeze-backbone --set EPOCHS=2  --> LP-FT giai đoạn 1: đóng băng ConvNeXt-T, chỉ khối chèn và đầu phân loại học (hậu tố " lp")
+#   --lpft 10                         --> LP-FT giai đoạn 2: tinh chỉnh toàn bộ từ best_model.pt của giai đoạn 1 cùng biến thể / seed / tỉ lệ bệnh nhân
+#                                         đã chạy với --freeze-backbone --block-lr 10 (hậu tố " lpft"); kèm --init-from-size: nguồn là lượt " lpft" ở độ phân giải đó
+#   --set PAUSE_AFTER_EPOCH=5         --> dừng sau epoch 5 (mã 75, không phải lỗi, chạy lại để tiếp tục); điểm là tốt nhất tới epoch đó
 QUEUE_LOG = config.MODELS_OUTPUT_DIRECTORY / "clis_v2_queue.log"
 HEAD_LR_MULTIPLIER = float(config.CLIS_LR_MULTIPLIER["convnext_t"])              # Hệ số LR đầu phân loại: m* đã tinh chỉnh của ConvNeXt-T
 RESIDUAL_INIT = "zero"                                                             # Khởi tạo phần dư của khối chèn; lượt LayerScale (thiếu khóa này trong model_kwargs) bị loại khỏi mọi tìm kiếm
@@ -57,10 +67,27 @@ def log(message):
         f.write(line + "\n")
 
 
-# Thư mục kết quả của một biến thể ở một độ phân giải (lượt trên một phần bệnh nhân: hậu tố tune<phần trăm>)
+# Hậu tố tên mô hình theo cách huấn luyện khối chèn: " lp" (LP-FT giai đoạn 1) | " lpft" (giai đoạn 2), " blr<s>" (LR khối chèn = s x LR backbone)
+# Trả về: Chuỗi (rỗng với lượt thường)
+def variant_suffix(block_lr = 1.0, freeze = False, lpft = None):
+    return (" lp" if freeze else "") + (" lpft" if lpft is not None else "") + (f" blr{block_lr:g}" if float(block_lr) != 1.0 else "")
+
+
+# Tham số model_kwargs của cách huấn luyện khối chèn (chỉ ghi khóa khác mặc định nên chữ ký lượt thường không đổi)
+# Trả về: dict
+def training_kwargs(block_lr = 1.0, freeze = False):
+    return {**({"block_lr_scale": float(block_lr)} if float(block_lr) != 1.0 else {}), **({"freeze_backbone": True} if freeze else {})}
+
+
+# Lượt chạy có đúng cách huấn luyện khối chèn không (so khóa block_lr_scale, freeze_backbone của model_kwargs)
+def same_training(model_kwargs, block_lr = 1.0, freeze = False):
+    return float(model_kwargs.get("block_lr_scale", 1.0)) == float(block_lr) and bool(model_kwargs.get("freeze_backbone", False)) == bool(freeze)
+
+
+# Thư mục kết quả của một biến thể ở một độ phân giải (hậu tố cách huấn luyện khối chèn; lượt trên một phần bệnh nhân: hậu tố tune<phần trăm>)
 # Trả về: Path
-def model_directory(name, size, fraction = 1.0):
-    model_name = v2.model_name(name, size) + (f" tune{round(fraction * 100)}" if fraction < 1 else "")
+def model_directory(name, size, fraction = 1.0, suffix = ""):
+    model_name = v2.model_name(name, size) + suffix + (f" tune{round(fraction * 100)}" if fraction < 1 else "")
     dataset_name = read_json(config.DATASET_INFO_DIRECTORY)["dataset_name"]
     return config.MODELS_OUTPUT_DIRECTORY / to_snake_case(dataset_name) / to_snake_case(model_name)
 
@@ -74,37 +101,51 @@ def run_settings(overrides):
 
 # ============================================================
 # best_model.pt của lượt chạy cùng biến thể, cùng seed ở độ phân giải `size`, LR mặc định của CLIS_PROTOCOL, đầu phân loại x m* của ConvNeXt-T,
-# đã xong fold (điểm khởi đầu khi tinh chỉnh ở độ phân giải cao hơn). convnext_t: lượt E1 của models/run_clis.py (model_kwargs rỗng). Phải tìm thấy đúng một lượt
+# cùng cách huấn luyện khối chèn (block_lr, freeze), đã xong fold. Dùng làm điểm khởi đầu khi tinh chỉnh ở độ phân giải cao hơn, hoặc giai đoạn 2 LP-FT
+# (nguồn là lượt freeze). convnext_t: lượt E1 của models/run_clis.py (model_kwargs rỗng). Phải tìm thấy đúng một lượt
 # Trả về: Path
-def find_checkpoint(name, seed, fold, size):
-    directory = model_directory(name, size)
+def find_checkpoint(name, seed, fold, size, fraction = 1.0, suffix = "", block_lr = 1.0, freeze = False):
+    directory = model_directory(name, size, fraction, suffix)
     learning_rate = float(config.CLIS_PROTOCOL["optimizer_config"]["learning_rate"])
     matches = []
     for info_path in sorted(directory.glob("run_*/train_info.json")):
         settings = read_json(info_path).get("settings", {})
         optimizer = settings.get("training_config", {}).get("optimizer", {})
+        model_kwargs = settings.get("model_kwargs", {})
         if (settings.get("seed") == int(seed) and settings.get("image_size") == int(size)
-                and settings.get("model_kwargs", {}).get("mixer", "convnext_t") == name and current_init(name, settings.get("model_kwargs", {}))
+                and model_kwargs.get("mixer", "convnext_t") == name and current_init(name, model_kwargs) and same_training(model_kwargs, block_lr, freeze)
                 and optimizer.get("new_module_lr_multiplier") == HEAD_LR_MULTIPLIER and optimizer.get("learning_rate") == learning_rate
                 and (info_path.parent / f"fold_{fold}" / "fold_done.json").is_file()):
             matches.append(info_path.parent / f"fold_{fold}" / "best_model.pt")
     if len(matches) != 1:
-        raise SystemExit(f"Cần đúng một lượt chạy {name} | seed {seed} | {size} px | LR {learning_rate:g}, đầu phân loại x {HEAD_LR_MULTIPLIER:g} đã xong fold {fold} "
+        raise SystemExit(f"Cần đúng một lượt chạy {name}{suffix} | seed {seed} | {size} px | LR {learning_rate:g}, đầu phân loại x {HEAD_LR_MULTIPLIER:g} đã xong fold {fold} "
                          f"trong {directory}, tìm thấy {len(matches)}: {[str(m) for m in matches]}")
     return matches[0]
 
 
+# Nguồn khởi tạo của lượt hiện tại: --init-from-size (cùng cách huấn luyện ở độ phân giải đó) hoặc --lpft (lượt giai đoạn 1 cùng độ phân giải, tỉ lệ bệnh nhân)
+# Trả về: Path hoặc None
+def init_source(name, seed, fold, overrides, block_lr, lpft, init_from_size):
+    size, fraction = run_settings(overrides)
+    if init_from_size is not None:
+        return find_checkpoint(name, seed, fold, init_from_size, fraction, variant_suffix(block_lr, lpft = lpft), block_lr)
+    if lpft is not None:
+        return find_checkpoint(name, seed, fold, size, fraction, variant_suffix(lpft, freeze = True), lpft, freeze = True)
+    return None
+
+
 # Thư mục fold của lượt chạy cùng (biến thể, seed, LR, ghi đè); None nếu chưa chạy. Nhiều lượt khớp: ưu tiên lượt đã xong fold, rồi lượt mới nhất
 # Trả về: Path hoặc None
-def find_fold_directory(name, seed, fold, overrides, learning_rate):
+def find_fold_directory(name, seed, fold, overrides, learning_rate, block_lr = 1.0, freeze = False, lpft = None):
     size, fraction = run_settings(overrides)
     candidates = []
-    for info_path in sorted(model_directory(name, size, fraction).glob("run_*/train_info.json")):
+    for info_path in sorted(model_directory(name, size, fraction, variant_suffix(block_lr, freeze, lpft)).glob("run_*/train_info.json")):
         settings = read_json(info_path).get("settings", {})
         snapshot = settings.get("config", {})
         optimizer = settings.get("training_config", {}).get("optimizer", {})
+        model_kwargs = settings.get("model_kwargs", {})
         if (settings.get("seed") == int(seed)
-                and settings.get("model_kwargs", {}).get("mixer", "convnext_t") == name and current_init(name, settings.get("model_kwargs", {}))
+                and model_kwargs.get("mixer", "convnext_t") == name and current_init(name, model_kwargs) and same_training(model_kwargs, block_lr, freeze)
                 and optimizer.get("new_module_lr_multiplier") == HEAD_LR_MULTIPLIER
                 and optimizer.get("learning_rate") == float(learning_rate)
                 and all(snapshot.get(key) == value for key, value in overrides.items() if key in snapshot)):
@@ -115,7 +156,7 @@ def find_fold_directory(name, seed, fold, overrides, learning_rate):
 
 # ============================================================
 # Tiến trình con: một (biến thể, seed, fold)
-def run_child(name, seed, fold, overrides, lr = None, init_from_size = None):
+def run_child(name, seed, fold, overrides, lr = None, init_from_size = None, block_lr = 1.0, freeze = False, lpft = None):
 
     # Cấu hình chung của nghiên cứu CLIS + ghi đè, một fold
     apply_config({**config.CLIS_CONFIG, **overrides, "SEED": int(seed), "TRAIN_ALL_FOLD": False, "SELECTED_FOLD": [int(fold)]})
@@ -127,16 +168,19 @@ def run_child(name, seed, fold, overrides, lr = None, init_from_size = None):
         protocol["optimizer_config"]["learning_rate"] = float(lr)
 
     # Tham số mô hình: khởi tạo 0 phép chiếu ra của khối chèn (ghi rõ vào chữ ký), checkpointing khối chèn theo BLOCK_GRAD_CHECKPOINT (convnext_t không có khối chèn)
+    # Cách huấn luyện khối chèn (LR khối chèn, đóng băng backbone) chỉ ghi khi khác mặc định; nguồn khởi tạo theo --init-from-size / --lpft
     kwargs = {"mixer": name}
     if name != "convnext_t":
         kwargs["residual_init"] = RESIDUAL_INIT
         kwargs["grad_checkpoint"] = bool(config.BLOCK_GRAD_CHECKPOINT)
-    if init_from_size is not None:
-        kwargs["init_from"] = str(find_checkpoint(name, seed, fold, init_from_size))
+    kwargs.update(training_kwargs(block_lr, freeze))
+    source = init_source(name, seed, fold, overrides, block_lr, lpft, init_from_size)
+    if source is not None:
+        kwargs["init_from"] = str(source)
         print(f"Khởi tạo từ {kwargs['init_from']}", flush = True)
 
-    # Tên mô hình (lượt trên một phần bệnh nhân: thư mục riêng, find_checkpoint không lấy nhầm)
-    model_name = v2.model_name(name)
+    # Tên mô hình (hậu tố cách huấn luyện khối chèn; lượt trên một phần bệnh nhân: thư mục riêng, find_checkpoint không lấy nhầm)
+    model_name = v2.model_name(name) + variant_suffix(block_lr, freeze, lpft)
     if float(config.TRAIN_PATIENT_FRACTION) < 1:
         model_name = f"{model_name} tune{round(float(config.TRAIN_PATIENT_FRACTION) * 100)}"
     return start_train(model_name = model_name, dataset_class = NIHChestXrayDataset, model_factory = v2.CLISMambaV2, model_kwargs = kwargs, **protocol)
@@ -146,7 +190,8 @@ def run_child(name, seed, fold, overrides, lr = None, init_from_size = None):
 # Trả về: Chuỗi mô tả hoặc None
 def describe_engagement(fold_directory):
     try:
-        state = load_torch(fold_directory / "best_model.pt")["model_state_dict"]
+        saved = load_torch(fold_directory / "best_model.pt")
+        state = v2.effective_state(saved["model_state_dict"], float(saved.get("model_kwargs", {}).get("block_lr_scale", 1.0)))
         values = []
         for index in range(len({key.split(".")[2] for key in state if key.startswith("inserted.blocks.")})):
             mixer = next(state[f"inserted.blocks.{index}.mixer.{name}.weight"] for name in ("out_proj", "fc2", "proj") if f"inserted.blocks.{index}.mixer.{name}.weight" in state)
@@ -164,6 +209,9 @@ if __name__ == "__main__":
     parser.add_argument("--fold", type = int, default = 1, help = "Fold dùng làm Validation")
     parser.add_argument("--lr", type = float, default = None, help = "LR backbone và khối chèn (mặc định learning_rate của CLIS_PROTOCOL)")
     parser.add_argument("--init-from-size", type = int, default = None, help = "Khởi tạo từ best_model.pt cùng biến thể / seed ở độ phân giải này")
+    parser.add_argument("--block-lr", type = float, default = 1.0, help = "LR khối chèn = hệ số x LR backbone (tham số hóa lại trong mô hình)")
+    parser.add_argument("--freeze-backbone", action = "store_true", help = "LP-FT giai đoạn 1: đóng băng ConvNeXt-T")
+    parser.add_argument("--lpft", type = float, default = None, metavar = "STAGE1_BLOCK_LR", help = "LP-FT giai đoạn 2: khởi tạo từ lượt --freeze-backbone với --block-lr này")
     parser.add_argument("--set", nargs = "+", default = [], metavar = "KEY=VALUE", help = "Ghi đè hằng số config (giá trị Python, ví dụ IMAGE_SIZE=1024)")
     parser.add_argument("--min-score", type = float, default = None, help = "Cổng: mã thoát 3 nếu macro AUROC Validation trung bình qua seed của một biến thể thấp hơn ngưỡng")
     parser.add_argument("--retries", type = int, default = 2)
@@ -182,10 +230,25 @@ if __name__ == "__main__":
         except (ValueError, SyntaxError):
             overrides[key] = value
 
-    # Tiến trình con
+    # Kiểm tra tổ hợp cờ huấn luyện khối chèn
+    if args.freeze_backbone and args.lpft is not None:
+        parser.error("--freeze-backbone (giai đoạn 1) và --lpft (giai đoạn 2) không dùng cùng lúc")
+    if args.block_lr <= 0 or (args.lpft is not None and args.lpft <= 0):
+        parser.error("--block-lr và --lpft phải dương")
+    if args.block_lr != 1.0 and "convnext_t" in args.names:
+        parser.error("convnext_t không có khối chèn: chạy riêng, không kèm --block-lr")
+    flags = {"block_lr": args.block_lr, "freeze": args.freeze_backbone, "lpft": args.lpft}
+    flag_text = ("" if args.block_lr == 1.0 else f" | LR khối chèn x {args.block_lr:g}") + (" | đóng băng backbone (LP-FT 1)" if args.freeze_backbone else "") \
+        + ("" if args.lpft is None else f" | LP-FT 2 từ lượt đóng băng x {args.lpft:g}")
+
+    # Tiến trình con (tạm dừng có chủ đích theo PAUSE_AFTER_EPOCH: mã PAUSED_EXIT, không phải lỗi)
     if args.child is not None:
         seed, fold = args.child
-        run_child(args.names[0], int(seed), int(fold), overrides, lr = args.lr, init_from_size = args.init_from_size)
+        try:
+            run_child(args.names[0], int(seed), int(fold), overrides, lr = args.lr, init_from_size = args.init_from_size, **flags)
+        except TrainingPaused as paused:
+            print(paused, flush = True)
+            sys.exit(PAUSED_EXIT)
         sys.exit(0)
 
     # Kiểm tra môi trường trong tiến trình con (tiến trình cha không khởi tạo CUDA nên không giữ VRAM suốt hàng đợi)
@@ -205,7 +268,8 @@ if __name__ == "__main__":
     if args.dry_run:
         for index, (name, seed) in enumerate(jobs, start = 1):
             start = "" if args.init_from_size is None else f" | khởi tạo từ {args.init_from_size} px"
-            print(f"{index:3d}. {v2.model_name(name, run_settings(overrides)[0])} | seed {seed} | LR {learning_rate:g}, đầu x {HEAD_LR_MULTIPLIER:g} | fold {args.fold}{start} | {overrides or ''}")
+            print(f"{index:3d}. {v2.model_name(name, run_settings(overrides)[0])}{variant_suffix(**flags)} | seed {seed} | LR {learning_rate:g}, đầu x {HEAD_LR_MULTIPLIER:g}"
+                  f" | fold {args.fold}{start}{flag_text} | {overrides or ''}")
         sys.exit(0)
 
     # Kiểm tra môi trường một lần cho cả hàng đợi
@@ -216,37 +280,40 @@ if __name__ == "__main__":
 
     keep_system_awake()
     log(f"HÀNG ĐỢI V2 {len(jobs)} việc | fold {args.fold} | LR {learning_rate:g}, đầu x {HEAD_LR_MULTIPLIER:g} | ghi đè {overrides or 'không'}"
-        + ("" if args.init_from_size is None else f" | khởi tạo từ {args.init_from_size} px") + ("" if args.min_score is None else f" | cổng macro_auroc >= {args.min_score:g}"))
+        + ("" if args.init_from_size is None else f" | khởi tạo từ {args.init_from_size} px") + flag_text + ("" if args.min_score is None else f" | cổng macro_auroc >= {args.min_score:g}"))
     selection_metric = config.CLIS_PROTOCOL["selection_metric"]
     failed, scores = [], {}
     for index, (name, seed) in enumerate(jobs, start = 1):
         command = ([sys.executable, script, name, "--child", str(seed), str(args.fold)] + (["--set", *args.set] if args.set else [])
-                   + (["--lr", str(args.lr)] if args.lr is not None else []) + (["--init-from-size", str(args.init_from_size)] if args.init_from_size is not None else []))
-        label = f"{index}/{len(jobs)} {name} | seed {seed}"
+                   + (["--lr", str(args.lr)] if args.lr is not None else []) + (["--init-from-size", str(args.init_from_size)] if args.init_from_size is not None else [])
+                   + (["--block-lr", str(args.block_lr)] if args.block_lr != 1.0 else []) + (["--freeze-backbone"] if args.freeze_backbone else [])
+                   + (["--lpft", str(args.lpft)] if args.lpft is not None else []))
+        label = f"{index}/{len(jobs)} {name}{variant_suffix(**flags)} | seed {seed}"
 
-        # Chạy, lỗi thì chờ rồi chạy lại
+        # Chạy, lỗi thì chờ rồi chạy lại (tạm dừng có chủ đích không phải lỗi)
         for attempt in range(1, args.retries + 2):
             log(f"BẮT ĐẦU {label} | lần {attempt}")
             started = time.time()
             code = subprocess.run(command, cwd = ROOT_DIR).returncode
-            log(f"KẾT THÚC {label} | mã {code} | {(time.time() - started) / 3600:.1f} giờ")
-            if code == 0:
+            log(f"KẾT THÚC {label} | mã {code}{' (tạm dừng)' if code == PAUSED_EXIT else ''} | {(time.time() - started) / 3600:.1f} giờ")
+            if code in (0, PAUSED_EXIT):
                 break
             if attempt <= args.retries:
                 time.sleep(args.retry_wait)
-        if code != 0:
+        if code not in (0, PAUSED_EXIT):
             failed.append((name, seed))
             continue
 
-        # Điểm Validation tốt nhất của lượt vừa xong, kèm mức tham gia của khối chèn
-        fold_directory = find_fold_directory(name, seed, args.fold, overrides, learning_rate)
+        # Điểm Validation tốt nhất của lượt vừa xong (lượt tạm dừng: tốt nhất tới epoch đã chạy), kèm mức tham gia của khối chèn
+        fold_directory = find_fold_directory(name, seed, args.fold, overrides, learning_rate, **flags)
         score = None if fold_directory is None else history_score(fold_directory, selection_metric)
-        if score is None or not score["finished"]:
+        if score is None or not (score["finished"] or code == PAUSED_EXIT):
             failed.append((name, seed, "không đọc được điểm"))
             continue
         scores.setdefault(name, {})[seed] = score["best_score"]
         engagement = None if name == "convnext_t" else describe_engagement(fold_directory)
-        log(f"ĐIỂM {name} | seed {seed} | Validation {selection_metric} {score['best_score']:.4f} ở epoch {score['best_epoch']} | {fold_directory.parent.name}"
+        paused_at = "" if score["finished"] else f" | tạm dừng sau epoch {int(pd.read_csv(fold_directory / 'history.csv')['epoch'].max())}"
+        log(f"ĐIỂM {name}{variant_suffix(**flags)} | seed {seed} | Validation {selection_metric} {score['best_score']:.4f} ở epoch {score['best_epoch']}{paused_at} | {fold_directory.parent.name}"
             + ("" if engagement is None else f" | |W chiếu ra| trộn/MLP {engagement}"))
 
     # Tổng kết theo biến thể: trung bình ± độ lệch chuẩn qua seed; cổng --min-score xét điểm trung bình

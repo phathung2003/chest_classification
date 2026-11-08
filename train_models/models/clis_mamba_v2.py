@@ -14,6 +14,7 @@ import math
 import timm
 import torch
 import torch.nn as nn
+import torch.nn.utils.parametrize as parametrize
 from torch.utils.checkpoint import checkpoint
 
 import config
@@ -43,6 +44,14 @@ from utilities.file import load_torch
 #
 # Nhóm LR: Khối chèn học cùng LR backbone (PRETRAINED_MODULES gồm "inserted"); đầu phân loại là nhóm lớp mới với hệ số m* của ConvNeXt-T (x40, models/run_clis_v2.py).
 # Cấu hình tối ưu vì vậy giống hệt baseline, không tinh chỉnh LR mới
+#
+# Pilot 2026-11-08 (lượt m_clis seed 42 trùng ConvNeXt-T seed 42 từng epoch: khối chèn gần như không được dùng, |W chiếu ra| ~0,004 sau 4 epoch):
+#   block_lr_scale = s  : Tham số hóa lại mọi tham số của khối chèn thành s x tham số thô (torch parametrize). Adam bất biến với thang gradient nên bước cập nhật
+#                         của tham số hiệu dụng gấp s lần, tức LR khối chèn = s x LR backbone mà không cần nhóm LR thứ ba (training/optimizer.py nằm trong hash pipeline).
+#                         Khác LR thật ở weight decay: tham số hiệu dụng vẫn giảm lr x wd mỗi bước (không phải s x lr x wd). s = 1: không tham số hóa, mô hình như cũ
+#   freeze_backbone     : Đóng băng ConvNeXt-T (stem, 4 stage); chỉ khối chèn và đầu phân loại học. Giai đoạn 1 của LP-FT (Kumar et al., ICLR 2022):
+#                         khối chèn buộc phải mang tín hiệu thích nghi CXR vì backbone không đổi; giai đoạn 2 tinh chỉnh toàn bộ từ checkpoint giai đoạn 1 (init_from)
+#   init_from với block_lr_scale khác lượt nguồn: trọng số được quy về giá trị hiệu dụng rồi chia cho s mới, nên mô hình nạp vào tính đúng như mô hình nguồn
 #
 # Biến thể (tên dùng ở models/run_clis_v2.py):
 #   convnext_t                     : Không chèn khối = đúng ConvNeXt-T baseline (dùng để tinh chỉnh baseline 512 px --> 1024 px từ checkpoint E1)
@@ -135,6 +144,38 @@ def output_projection(mixer):
 
 
 # ============================================================
+# Tham số hóa lại: tham số hiệu dụng = scale x tham số thô (right_inverse: thô = hiệu dụng / scale, nên đăng ký giữ nguyên giá trị hiệu dụng)
+class Scale(nn.Module):
+    def __init__(self, scale):
+        super().__init__()
+        self.scale = float(scale)
+
+    def forward(self, raw):
+        return raw * self.scale
+
+    def right_inverse(self, value):
+        return value / self.scale
+
+
+# Tham số hóa lại mọi tham số của module thành scale x tham số thô (LR hiệu dụng gấp scale lần với Adam / AdamW)
+def scale_parameters(module, scale):
+    for submodule in list(module.modules()):
+        for name in [name for name, _ in submodule.named_parameters(recurse = False)]:
+            parametrize.register_parametrization(submodule, name, Scale(scale))
+
+
+# Tên tham số khi bỏ tham số hóa: "a.parametrizations.w.original" --> "a.w"
+def plain_name(name):
+    return name.replace("parametrizations.", "").removesuffix(".original")
+
+
+# state_dict --> giá trị hiệu dụng theo tên thường (tham số thô của khối chèn nhân lại scale của mô hình nguồn)
+# Trả về: dict
+def effective_state(state, scale):
+    return {plain_name(key): (value * scale if key.endswith(".original") else value) for key, value in state.items()}
+
+
+# ============================================================
 # Khối MetaFormer chèn; mã hóa vị trí chỉ cộng vào đầu vào của bộ trộn (không vào dòng chính)
 #   residual_init = "zero"       : Phép chiếu ra của bộ trộn và Linear cuối của MLP khởi tạo bằng 0 --> khối là phép đồng nhất ở bước 0
 #   residual_init = "layerscale" : Cách cũ (đã bỏ): hai phần dư nhân LayerScale γ khởi tạo LAYER_SCALE_INIT
@@ -193,13 +234,19 @@ class InsertedBlocks(nn.Module):
 # Mô hình đầy đủ (mixer = "convnext_t": không chèn khối, đúng ConvNeXt-T baseline)
 class CLISMambaV2(nn.Module):
     def __init__(self, num_classes, mixer = "m_clis", depth = 4, d_state = 16, mlp_ratio = 2.0, residual_init = "zero",
-                 grad_checkpoint = True, backbone_checkpoint = False, pretrained = True, init_from = None):
+                 grad_checkpoint = True, backbone_checkpoint = False, pretrained = True, init_from = None, block_lr_scale = 1.0, freeze_backbone = False):
         super().__init__()
 
-        # Kiểm tra biến thể
+        # Kiểm tra biến thể và hệ số LR khối chèn
         if mixer not in NAMES:
             raise ValueError(f"Biến thể '{mixer}' không hợp lệ: {list(NAMES)}")
+        if not math.isfinite(float(block_lr_scale)) or float(block_lr_scale) <= 0:
+            raise ValueError(f"block_lr_scale phải là số dương hữu hạn, nhận được {block_lr_scale}")
+        if mixer == "convnext_t" and float(block_lr_scale) != 1.0:
+            raise ValueError("convnext_t không có khối chèn nên không dùng block_lr_scale")
         self.mixer = mixer
+        self.block_lr_scale = float(block_lr_scale)
+        self.freeze_backbone = bool(freeze_backbone)
 
         # 1. Backbone + đầu phân loại tạo theo đúng thứ tự của baseline (cùng seed --> cùng trọng số khởi tạo đầu phân loại)
         self.cnn = timm.create_model("convnext_tiny.fb_in1k", pretrained = pretrained and init_from is None, num_classes = 0)
@@ -208,11 +255,14 @@ class CLISMambaV2(nn.Module):
 
         # 2. Khối chèn giữa stage 3 và stage 4 (tạo sau đầu phân loại)
         self.inserted = None if mixer == "convnext_t" else InsertedBlocks(DIM, mixer, depth, d_state, mlp_ratio, residual_init, grad_checkpoint)
+        if self.inserted is not None and self.block_lr_scale != 1.0:
+            scale_parameters(self.inserted, self.block_lr_scale)                    # LR hiệu dụng của khối chèn = block_lr_scale x LR backbone
 
         # 3. Nhóm LR backbone (training/optimizer.py): backbone ImageNet và khối chèn; còn lại (đầu phân loại) là nhóm lớp mới
         self.PRETRAINED_MODULES = ("cnn",) if self.inserted is None else ("cnn", "inserted")
 
-        # 4. Khởi tạo từ best_model.pt cùng biến thể (ví dụ 512 px, trước khi tinh chỉnh ở 1024 px); checkpoint baseline E1 (models/convnext_tiny.py) không có khóa mixer
+        # 4. Khởi tạo từ best_model.pt cùng biến thể (ví dụ 512 px, trước khi tinh chỉnh ở 1024 px; hoặc giai đoạn 1 LP-FT);
+        #    checkpoint baseline E1 (models/convnext_tiny.py) không có khóa mixer. Trọng số quy về giá trị hiệu dụng rồi chia block_lr_scale của mô hình này
         if init_from is not None:
             saved = load_torch(init_from)
             saved_mixer = saved["model_kwargs"].get("mixer", "convnext_t")
@@ -220,12 +270,20 @@ class CLISMambaV2(nn.Module):
                 raise ValueError(f"{init_from} là checkpoint của biến thể {saved_mixer}, không phải {mixer}")
             if self.inserted is not None and saved["model_kwargs"].get("residual_init", "layerscale") != residual_init:
                 raise ValueError(f"{init_from} dùng cách khởi tạo phần dư khác {residual_init}")
-            self.load_state_dict(saved["model_state_dict"])
+            state = effective_state(saved["model_state_dict"], float(saved["model_kwargs"].get("block_lr_scale", 1.0)))
+            expected = {plain_name(key) for key in self.state_dict()}
+            if set(state) != expected:
+                raise ValueError(f"{init_from}: khóa không khớp mô hình, thiếu {sorted(expected - set(state))[:5]}, thừa {sorted(set(state) - expected)[:5]}")
+            self.load_state_dict({key: (state[plain_name(key)] / self.block_lr_scale if key.endswith(".original") else state[plain_name(key)]) for key in self.state_dict()})
+
+        # 5. Giai đoạn 1 LP-FT: backbone ConvNeXt-T không học (không BatchNorm, drop path 0 nên chế độ train không đổi đầu ra của backbone)
+        if self.freeze_backbone:
+            self.cnn.requires_grad_(False)
 
     # Tham số không áp dụng weight decay (quy ước timm): mã hóa vị trí và tham số SSM (A_log, D, dt_bias) như Mamba / VMamba.
     # γ LayerScale, bias, norm là tham số 1 chiều: no_weight_decay_1d của CLIS_PROTOCOL đã bỏ decay
     def no_weight_decay(self):
-        return {name for name, _ in self.named_parameters() if name.startswith("inserted.pe.") or name.rsplit(".", 1)[-1] in ("A_log", "D", "dt_bias")}
+        return {name for name, _ in self.named_parameters() if name.startswith("inserted.pe.") or plain_name(name).rsplit(".", 1)[-1] in ("A_log", "D", "dt_bias")}
 
     # Bản đồ đặc trưng sau stage 4 (trước pooling)
     # Trả về: (b, 768, R / 32, R / 32)
