@@ -140,6 +140,90 @@ def test_forward_backward():
     assert "inserted.pe.row" in model.no_weight_decay() and "inserted.blocks.0.mixer.A_log" in model.no_weight_decay()
 
 
+# Một bước Adam (không weight decay) trên loss cố định; trả về bản sao giá trị hiệu dụng trước và sau bước
+def adam_step(model, x, lr = 1e-3):
+    before = {name: value.detach().clone() for name, value in v2.effective_state(model.state_dict(), model.block_lr_scale).items()}
+    optimizer = torch.optim.Adam([p for p in model.parameters() if p.requires_grad], lr = lr)
+    model(x).pow(2).sum().backward()
+    optimizer.step()
+    optimizer.zero_grad()
+    after = v2.effective_state(model.state_dict(), model.block_lr_scale)
+    return before, after
+
+
+# block_lr_scale: cùng giá trị hiệu dụng (đầu ra trùng mô hình s = 1), tên tham số thô ".original", tham số SSM vẫn không decay,
+# và với Adam bước cập nhật hiệu dụng của khối chèn gấp s lần, của backbone / đầu phân loại không đổi
+def test_block_lr_scale():
+    x = torch.randn(2, 3, SIZE, SIZE)
+    plain, scaled = make("m_clis"), make("m_clis", block_lr_scale = 10.0)
+    assert all(name.endswith(".original") for name, _ in scaled.named_parameters() if name.startswith("inserted."))
+    assert not any("parametrizations" in name for name, _ in scaled.named_parameters() if not name.startswith("inserted."))
+    assert any(name.endswith("A_log.original") for name in scaled.no_weight_decay()) and len(scaled.no_weight_decay()) == len(plain.no_weight_decay())
+    groups = parameter_groups(scaled, torch.nn.BCEWithLogitsLoss(), 1e-4, 40.0, no_weight_decay_1d = True)
+    assert sum(len(group["params"]) for group in groups) == len(list(scaled.parameters()))
+    with torch.no_grad():
+        assert torch.allclose(plain.eval()(x), scaled.eval()(x), atol = 1e-6)
+
+    # Bước Adam đầu tiên: |Δ| mỗi phần tử ~ lr, nên tỉ lệ trung bình |Δ hiệu dụng| khối chèn ~ 10, backbone ~ 1
+    plain.train(), scaled.train()
+    for _ in range(2):                                                       # Bước 1 làm phép chiếu ra (khởi tạo 0) khác 0 để mọi tham số khối chèn có gradient
+        (b1, a1), (b2, a2) = adam_step(plain, x), adam_step(scaled, x)
+    for key, expected in (("inserted.blocks.0.mlp.0.weight", 10.0), ("inserted.blocks.0.mixer.x_proj", 10.0), ("cnn.stages.3.blocks.0.mlp.fc1.weight", 1.0), ("classifier.weight", 1.0)):
+        ratio = (a2[key] - b2[key]).abs().mean() / (a1[key] - b1[key]).abs().mean()
+        assert abs(ratio / expected - 1) < 0.15, f"{key}: tỉ lệ bước cập nhật {ratio:.3f}, cần ~{expected}"
+
+
+# Khởi tạo từ checkpoint có block_lr_scale khác: giá trị hiệu dụng và đầu ra giữ nguyên; convnext_t từ chối block_lr_scale
+def test_init_from_across_scales():
+    x = torch.randn(2, 3, SIZE, SIZE)
+    source = make("m_clis", seed = 3, block_lr_scale = 10.0)
+    adam_step(source.train(), x)                                             # Phép chiếu ra khác 0
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "best_model.pt"
+        torch.save({"model_kwargs": {"mixer": "m_clis", "residual_init": "zero", "block_lr_scale": 10.0}, "model_state_dict": source.state_dict()}, path)
+        with torch.no_grad():
+            reference = source.eval()(x)
+            for scale in (1.0, 3.0, 10.0):
+                loaded = make("m_clis", seed = 4, block_lr_scale = scale, init_from = str(path)).eval()
+                assert torch.allclose(loaded(x), reference, atol = 1e-5), f"Nạp vào block_lr_scale = {scale} phải giữ đầu ra"
+                assert any(a > 0 for a, _ in loaded.engagement())
+    try:
+        make("convnext_t", block_lr_scale = 2.0)
+    except ValueError:
+        return
+    raise AssertionError("convnext_t phải từ chối block_lr_scale")
+
+
+# freeze_backbone: ConvNeXt-T không nhận gradient; khối chèn và đầu phân loại vẫn học; convnext_t đóng băng chỉ còn đầu phân loại
+def test_freeze_backbone():
+    x = torch.randn(2, 3, SIZE, SIZE)
+    for mixer, trainable in (("m_clis", ("inserted.", "classifier.")), ("convnext_t", ("classifier.",))):
+        model = make(mixer, freeze_backbone = True).train()
+        model(x).sum().backward()
+        for name, parameter in model.named_parameters():
+            if name.startswith("cnn."):
+                assert not parameter.requires_grad and parameter.grad is None, f"{name} phải đóng băng"
+            else:
+                assert name.startswith(trainable) and parameter.requires_grad, name
+        assert model.classifier.weight.grad is not None
+        if mixer == "m_clis":
+            assert model.inserted.blocks[0].mlp[2].weight.grad.abs().sum() > 0
+        groups = parameter_groups(model, torch.nn.BCEWithLogitsLoss(), 1e-4, 40.0, no_weight_decay_1d = True)
+        assert sum(len(group["params"]) for group in groups) == len(list(model.parameters()))
+
+
+# Runner: hậu tố thư mục và khóa model_kwargs của cách huấn luyện khối chèn; lượt thường không thêm khóa (chữ ký giữ dạng cũ)
+def test_runner_variants():
+    import models.run_clis_v2 as runner
+    assert runner.variant_suffix() == "" and runner.training_kwargs() == {}
+    assert runner.variant_suffix(10.0, freeze = True) == " lp blr10" and runner.variant_suffix(1.0, lpft = 10.0) == " lpft"
+    assert runner.variant_suffix(2.5, lpft = 10.0) == " lpft blr2.5"
+    assert runner.training_kwargs(10.0, True) == {"block_lr_scale": 10.0, "freeze_backbone": True}
+    assert runner.same_training({}, 1.0, False) and not runner.same_training({"freeze_backbone": True}, 1.0, False)
+    assert runner.same_training({"block_lr_scale": 10.0, "freeze_backbone": True}, 10, True)
+    assert runner.model_directory("m_clis", 512, 0.3, " lp blr10").name == "clismamba_v2_m_clis_512px_lp_blr10_tune30"
+
+
 if __name__ == "__main__":
     tests = [(name, value) for name, value in list(globals().items()) if name.startswith("test_")]
     failed = []
