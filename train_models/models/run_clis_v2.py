@@ -217,6 +217,7 @@ if __name__ == "__main__":
     parser.add_argument("--retries", type = int, default = 2)
     parser.add_argument("--retry-wait", type = int, default = 60)
     parser.add_argument("--dry-run", action = "store_true")
+    parser.add_argument("--print-score", action = "store_true", help = "Chỉ in macro AUROC Validation tốt nhất (trung bình qua seed) của các lượt đã xong rồi thoát; thiếu lượt: mã 1")
     parser.add_argument("--child", nargs = 2, default = None, help = argparse.SUPPRESS)
     parser.add_argument("--check-only", action = "store_true", help = argparse.SUPPRESS)
     args = parser.parse_args()
@@ -270,6 +271,21 @@ if __name__ == "__main__":
             start = "" if args.init_from_size is None else f" | khởi tạo từ {args.init_from_size} px"
             print(f"{index:3d}. {v2.model_name(name, run_settings(overrides)[0])}{variant_suffix(**flags)} | seed {seed} | LR {learning_rate:g}, đầu x {HEAD_LR_MULTIPLIER:g}"
                   f" | fold {args.fold}{start}{flag_text} | {overrides or ''}")
+        sys.exit(0)
+
+    # Chỉ in điểm của lượt đã xong (lượt tạm dừng theo PAUSE_AFTER_EPOCH: tốt nhất tới epoch đó), dùng làm ngưỡng cổng trong launcher
+    if args.print_score:
+        selection_metric = config.CLIS_PROTOCOL["selection_metric"]
+        pause_epoch = overrides.get("PAUSE_AFTER_EPOCH")
+        values = []
+        for name, seed in jobs:
+            fold_directory = find_fold_directory(name, seed, args.fold, overrides, learning_rate, **flags)
+            score = None if fold_directory is None else history_score(fold_directory, selection_metric, last_epoch = pause_epoch)
+            if score is None or not (score["finished"] or pause_epoch is not None):
+                print(f"Chưa có lượt đã xong: {name}{variant_suffix(**flags)} | seed {seed}", file = sys.stderr, flush = True)
+                sys.exit(1)
+            values.append(score["best_score"])
+        print(f"{sum(values) / len(values):.6f}", flush = True)
         sys.exit(0)
 
     # Kiểm tra môi trường một lần cho cả hàng đợi
