@@ -35,6 +35,7 @@ import pandas as pd
 
 import config
 import models.clis_mamba as clis
+import models.clis_mamba_v2 as v2
 import models.convnext_tiny as convnext
 import models.densenet121 as densenet
 from training.evaluate import evaluate
@@ -132,6 +133,9 @@ def build_model(settings, number_of_classes):
         return densenet.DenseNetBaseline(num_classes = number_of_classes)
     if model_name.startswith(convnext.MODEL_NAME):
         return convnext.ConvNeXtTinyBaseline(num_classes = number_of_classes, pretrained = False)
+    if model_name.startswith("CLIS-Mamba v2"):                                 # v2 (models/clis_mamba_v2.py): đóng băng chỉ có nghĩa lúc huấn luyện
+        kwargs.pop("freeze_backbone", None)
+        return v2.CLISMambaV2(num_classes = number_of_classes, pretrained = False, **kwargs)
     return clis.CLISMamba(num_classes = number_of_classes, pretrained = False, **kwargs)
 
 
