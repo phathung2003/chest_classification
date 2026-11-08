@@ -49,7 +49,7 @@ OUTPUT_PATH = config.MODELS_OUTPUT_DIRECTORY / "block_engagement.csv"
 # Mở rộng danh sách thư mục lượt chạy (mẫu * do script tự mở rộng)
 # Trả về: Danh sách đường dẫn
 def expand_runs(patterns):
-    return [Path(path) for pattern in patterns for path in (sorted(glob.glob(str(pattern))) if glob.has_magic(str(pattern)) else [pattern])]
+    return [Path(path).resolve() for pattern in patterns for path in (sorted(glob.glob(str(pattern))) if glob.has_magic(str(pattern)) else [pattern])]
 
 
 # ============================================================
