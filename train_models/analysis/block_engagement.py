@@ -105,7 +105,12 @@ def measure(run_directory, fold, limit, workers, device):
     on, off, ratios, targets = torch.cat(on).numpy(), torch.cat(off).numpy(), torch.cat(ratios).numpy(), torch.cat(targets).numpy()
 
     # Kiểm tra nạp đúng: xác suất "bật" so với oof_predictions.csv đã lưu lúc huấn luyện (ghép theo mã ảnh)
-    saved = pd.read_csv(fold_directory / "oof_predictions.csv").set_index("Image Index").loc[frame["Image Index"], [f"prob_{name}" for name in classes]].to_numpy(dtype = np.float64)
+    # (lượt tạm dừng theo PAUSE_AFTER_EPOCH chưa ghi oof_predictions.csv: bỏ kiểm tra, saved_diff = NaN)
+    saved_path = fold_directory / "oof_predictions.csv"
+    saved_diff = float("nan")
+    if saved_path.is_file():
+        saved = pd.read_csv(saved_path).set_index("Image Index").loc[frame["Image Index"], [f"prob_{name}" for name in classes]].to_numpy(dtype = np.float64)
+        saved_diff = float(np.abs(on - saved).max())
     auroc_on, auroc_off = macro_auroc(targets, on), macro_auroc(targets, off)
 
     del model, best
@@ -113,7 +118,7 @@ def measure(run_directory, fold, limit, workers, device):
             "block_lr_scale": float(kwargs.get("block_lr_scale", 1.0)), "freeze_backbone": bool(settings["model_kwargs"].get("freeze_backbone", False)),
             "init_from": settings["model_kwargs"].get("init_from"), "images": len(frame), "ratio_mean": float(ratios.mean()), "ratio_median": float(np.median(ratios)),
             "auroc_on": auroc_on, "auroc_off": auroc_off, "auroc_drop": auroc_on - auroc_off, "prob_change": float(np.abs(on - off).mean()),
-            "saved_diff": float(np.abs(on - saved).max()), "measured_at": timestamp()}
+            "saved_diff": saved_diff, "measured_at": timestamp()}
 
 
 # ============================================================
@@ -134,7 +139,7 @@ def main():
             continue
         try:
             row = measure(run_directory, args.fold, args.limit, args.workers, device)
-        except (SystemExit, RuntimeError, KeyError, ValueError) as error:
+        except (SystemExit, RuntimeError, KeyError, ValueError, OSError) as error:
             print(f"Lỗi khi đo {run_directory}: {error}", flush = True)
             continue
         if row is None:
