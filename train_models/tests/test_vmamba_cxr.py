@@ -82,6 +82,30 @@ def test_identity_at_init():
     assert make("vm_ras").engagement() == []
 
 
+# route_init "copy": tuyến thêm là bản chép đủ của tuyến hàng xuôi / ngược (cả hàng C và D), hoạt động ngay ở bước 0;
+# cùng số tham số với "zero"; giá trị khác bị từ chối
+def test_copy_route_init():
+    x = torch.randn(2, 3, SIZE, SIZE)
+    base = make("vm_ras").eval()
+    for mixer in ("vm_clis", "vm_rand"):
+        model = make(mixer, route_init = "copy").eval()
+        op = model.backbone.layers[2].blocks[0].op
+        k, r, n, d = op.k_group, op.dt_rank, op.d_state, op.d_inner
+        weight, Ds = op.x_proj.weight.view(k, r + 2 * n, d), op.Ds.view(k, d)
+        assert torch.equal(weight[4], weight[0]) and torch.equal(weight[5], weight[2]), "Tuyến thêm phải chép đủ x_proj của tuyến hàng"
+        assert torch.equal(Ds[4], Ds[0]) and torch.equal(Ds[5], Ds[2]), "Tuyến thêm phải chép D của tuyến hàng"
+        assert all(c > 0 and d > 0 for _, c, d in model.engagement())
+        # Khởi tạo ngẫu nhiên: D = 1 trội hơn C nhiều, phần D·x của mọi tuyến như nhau và out_norm chuẩn hóa lại, nên đầu ra chỉ đổi rất ít (cỡ 1e-5)
+        with torch.no_grad():
+            assert not torch.equal(model(x), base(x)), f"{mixer} copy: tuyến thêm phải đổi đầu ra ở bước 0"
+        assert clis.count_parameters(model) == clis.count_parameters(make(mixer))
+    try:
+        make("vm_clis", route_init = "half")
+    except ValueError:
+        return
+    raise AssertionError("Phải từ chối route_init không hợp lệ")
+
+
 # Số tham số: vm_clis = vm_rand; chênh với vm_ras đúng bằng tham số của 2 tuyến ở các khối stage 3, 4
 def test_parameter_counts():
     sizes = {mixer: clis.count_parameters(vmx.VMambaCXR(14, mixer = mixer, pretrained = False)) for mixer in vmx.NAMES}
