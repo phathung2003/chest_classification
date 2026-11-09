@@ -34,6 +34,8 @@ from utilities.file import load_torch
 #      vm_clis / vm_rand thêm 2 tuyến ghép cặp (CLIS ± / cặp ngẫu nhiên ±). Tham số của 2 tuyến mới chép từ tuyến hàng xuôi / hàng ngược,
 #      riêng hàng C của x_proj và D đặt 0 nên tuyến mới cho đầu ra 0: ở bước 0 vm_clis / vm_rand trùng VMamba-T tiền huấn luyện
 #      (cùng ý tưởng khởi tạo 0 phép chiếu ra của v2). C nhận gradient ngay từ bước đầu vì trạng thái ẩn h khác 0
+#      route_init = "copy" (2026-11-10): chép đủ cả hàng C và D, tuyến mới hoạt động ngay từ bước 0 (không còn trùng VMamba-T tiền huấn luyện).
+#      Lý do: sau huấn luyện full-data với "zero", ||tổng tuyến thêm|| chỉ bằng vài phần trăm ||tổng tuyến gốc|| (analysis/route_engagement.py)
 #
 # Nhóm LR: backbone (gồm tham số 2 tuyến mới) dùng LR backbone; đầu phân loại là nhóm lớp mới (models/run_vmamba.py: hệ số m* của ConvNeXt-T)
 #
@@ -51,6 +53,7 @@ CHECKPOINT_SHA256 = "d855b57224a652bc692804932f88dc3a39b9028e64be99f745a7fd6792c
 FEATURES = 768                                  # Số kênh sau stage 4 của VMamba-T
 ROUTE_STAGES = (2, 3)                           # Chỉ số stage (0-3) quét bằng hoán vị gather; vm_clis / vm_rand thêm tuyến ở các stage này
 BASE_ROUTES = 4                                 # Số tuyến của VMamba
+ROUTE_INITS = ("zero", "copy")                  # Khởi tạo tuyến thêm: "zero" = hàng C và D bằng 0 (trùng VMamba-T ở bước 0); "copy" = chép đủ từ tuyến hàng
 
 
 # ============================================================
@@ -126,9 +129,10 @@ def route_forward_core(op, x):
     return op.out_norm(y).to(x.dtype)
 
 
-# Thêm tuyến cho một SS2D đã nạp trọng số: chép tham số tuyến hàng xuôi (0) / hàng ngược (2) sang tuyến mới, đặt hàng C của x_proj và D bằng 0
-# (đầu ra tuyến mới = C·h + D·x = 0 --> SS2D trùng bản 4 tuyến ở bước 0)
-def add_routes(op, extra):
+# Thêm tuyến cho một SS2D đã nạp trọng số: chép tham số tuyến hàng xuôi (0) / hàng ngược (2) sang tuyến mới
+# - init "zero": đặt hàng C của x_proj và D bằng 0 (đầu ra tuyến mới = C·h + D·x = 0 --> SS2D trùng bản 4 tuyến ở bước 0)
+# - init "copy": giữ nguyên bản chép (tuyến mới là tuyến hàng đã tiền huấn luyện, chỉ khác thứ tự quét)
+def add_routes(op, extra, init = "zero"):
     if extra == 0:
         return
     k, d, n, r = op.k_group, op.d_inner, op.d_state, op.dt_rank
@@ -137,9 +141,11 @@ def add_routes(op, extra):
     with torch.no_grad():
         x_proj = op.x_proj.weight.view(k, r + 2 * n, d)
         new_x = x_proj[source].clone()
-        new_x[:, r + n:] = 0                                                        # Hàng C của tuyến mới
+        if init == "zero":
+            new_x[:, r + n:] = 0                                                    # Hàng C của tuyến mới
         dt_projs = op.dt_projs.weight.view(k, d, r)
         A_logs, Ds = op.A_logs.view(k, d, n), op.Ds.view(k, d)
+        new_D = torch.zeros_like(Ds[source]) if init == "zero" else Ds[source].clone()
 
         total = k + extra
         op.x_proj = vm.Linear(d, total * (r + 2 * n), groups = total, bias = False, channel_first = True)
@@ -148,7 +154,7 @@ def add_routes(op, extra):
         op.dt_projs.weight.copy_(torch.cat([dt_projs, dt_projs[source]]).view(-1, r))
         op.dt_projs_bias = nn.Parameter(torch.cat([op.dt_projs_bias.data, op.dt_projs_bias.data[source]]))
         op.A_logs = nn.Parameter(torch.cat([A_logs, A_logs[source]]).view(-1, n))
-        op.Ds = nn.Parameter(torch.cat([Ds, torch.zeros_like(Ds[source])]).view(-1))   # D của tuyến mới
+        op.Ds = nn.Parameter(torch.cat([Ds, new_D]).view(-1))                           # D của tuyến mới
     op.k_group = total
 
 
@@ -178,12 +184,14 @@ def imagenet_state():
 # Mô hình đầy đủ
 class VMambaCXR(nn.Module):
     def __init__(self, num_classes, mixer = "vm_clis", route_stages = ROUTE_STAGES, extra_routes = 2, drop_path_rate = 0.0,
-                 grad_checkpoint = False, pretrained = True, init_from = None):
+                 grad_checkpoint = False, pretrained = True, init_from = None, route_init = "zero"):
         super().__init__()
 
-        # Kiểm tra biến thể
+        # Kiểm tra biến thể và cách khởi tạo tuyến thêm
         if mixer not in NAMES:
             raise ValueError(f"Biến thể '{mixer}' không hợp lệ: {list(NAMES)}")
+        if route_init not in ROUTE_INITS:
+            raise ValueError(f"route_init '{route_init}' không hợp lệ: {list(ROUTE_INITS)}")
         self.mixer = mixer
         self.grad_checkpoint = bool(grad_checkpoint)
 
@@ -201,7 +209,7 @@ class VMambaCXR(nn.Module):
             for block in self.backbone.layers[stage].blocks:
                 op = block.op
                 op.route_variant, op.route_cache = mixer, {}
-                add_routes(op, extra)
+                add_routes(op, extra, route_init)
                 op.forward_core = partial(route_forward_core, op)
 
         # 3. Nhóm LR backbone (training/optimizer.py): backbone ImageNet và tham số tuyến mới; đầu phân loại là nhóm lớp mới

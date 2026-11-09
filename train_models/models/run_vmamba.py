@@ -39,6 +39,7 @@ from utilities.setting import apply_config, keep_system_awake
 #
 # Ví dụ (WSL2, conda activate mamba-t29):
 #   python models/run_vmamba.py vm_ras vm_clis vm_rand --seeds 42 --set TRAIN_PATIENT_FRACTION=0.3 PAUSE_AFTER_EPOCH=5   --> pilot 30% bệnh nhân
+#   python models/run_vmamba.py vm_clis vm_rand --seeds 42 --route-init copy                                    --> tuyến thêm chép đủ từ tuyến hàng (thư mục hậu tố " copy")
 #   python models/run_vmamba.py vm_clis --seeds 42 --init-from-size 512 --lr 5e-5 --set IMAGE_SIZE=1024 BATCH_SIZE=4 GRAD_ACCUM_STEPS=8 EPOCHS=5 BLOCK_GRAD_CHECKPOINT=True
 QUEUE_LOG = config.MODELS_OUTPUT_DIRECTORY / "clis_vmamba_queue.log"
 DEFAULT_HEAD_LR = float(config.CLIS_LR_MULTIPLIER["convnext_t"])                  # Hệ số LR đầu phân loại: m* đã tinh chỉnh của ConvNeXt-T
@@ -59,33 +60,40 @@ def run_settings(overrides):
     return int(settings.get("IMAGE_SIZE", config.IMAGE_SIZE)), float(settings.get("TRAIN_PATIENT_FRACTION", config.TRAIN_PATIENT_FRACTION))
 
 
+# Tên mô hình kèm cách khởi tạo tuyến thêm (mặc định "zero" không thêm hậu tố, giữ tên thư mục của các lượt cũ)
+# Trả về: Chuỗi
+def variant_name(name, size = None, route_init = "zero"):
+    return vmx.model_name(name, size) + ("" if route_init == "zero" else f" {route_init}")
+
+
 # Thư mục kết quả của một biến thể ở một độ phân giải (lượt trên một phần bệnh nhân: hậu tố tune<phần trăm>)
 # Trả về: Path
-def model_directory(name, size, fraction = 1.0):
-    model_name = vmx.model_name(name, size) + (f" tune{round(fraction * 100)}" if fraction < 1 else "")
+def model_directory(name, size, fraction = 1.0, route_init = "zero"):
+    model_name = variant_name(name, size, route_init) + (f" tune{round(fraction * 100)}" if fraction < 1 else "")
     dataset_name = read_json(config.DATASET_INFO_DIRECTORY)["dataset_name"]
     return config.MODELS_OUTPUT_DIRECTORY / to_snake_case(dataset_name) / to_snake_case(model_name)
 
 
-# Các lượt chạy cùng (biến thể, seed, LR backbone, hệ số đầu) trong một thư mục
+# Các lượt chạy cùng (biến thể, seed, LR backbone, hệ số đầu, khởi tạo tuyến thêm) trong một thư mục
 # Trả về: Danh sách (train_info path, settings)
-def matching_runs(directory, name, seed, learning_rate, head_lr):
+def matching_runs(directory, name, seed, learning_rate, head_lr, route_init = "zero"):
     runs = []
     for info_path in sorted(directory.glob("run_*/train_info.json")):
         settings = read_json(info_path).get("settings", {})
         optimizer = settings.get("training_config", {}).get("optimizer", {})
         if (settings.get("seed") == int(seed) and settings.get("model_kwargs", {}).get("mixer") == name
-                and optimizer.get("new_module_lr_multiplier") == float(head_lr) and optimizer.get("learning_rate") == float(learning_rate)):
+                and optimizer.get("new_module_lr_multiplier") == float(head_lr) and optimizer.get("learning_rate") == float(learning_rate)
+                and settings.get("model_kwargs", {}).get("route_init", "zero") == route_init):
             runs.append((info_path, settings))
     return runs
 
 
 # best_model.pt của lượt cùng biến thể / seed ở độ phân giải `size` (LR mặc định của CLIS_PROTOCOL), đã xong fold. Phải có đúng một lượt
 # Trả về: Path
-def find_checkpoint(name, seed, fold, size, fraction, head_lr):
+def find_checkpoint(name, seed, fold, size, fraction, head_lr, route_init = "zero"):
     learning_rate = float(config.CLIS_PROTOCOL["optimizer_config"]["learning_rate"])
-    directory = model_directory(name, size, fraction)
-    matches = [info_path.parent / f"fold_{fold}" / "best_model.pt" for info_path, settings in matching_runs(directory, name, seed, learning_rate, head_lr)
+    directory = model_directory(name, size, fraction, route_init)
+    matches = [info_path.parent / f"fold_{fold}" / "best_model.pt" for info_path, settings in matching_runs(directory, name, seed, learning_rate, head_lr, route_init)
                if settings.get("image_size") == int(size) and (info_path.parent / f"fold_{fold}" / "fold_done.json").is_file()]
     if len(matches) != 1:
         raise SystemExit(f"Cần đúng một lượt {name} | seed {seed} | {size} px đã xong fold {fold} trong {directory}, tìm thấy {len(matches)}")
@@ -94,10 +102,10 @@ def find_checkpoint(name, seed, fold, size, fraction, head_lr):
 
 # Thư mục fold của lượt cùng (biến thể, seed, LR, ghi đè); None nếu chưa chạy. Nhiều lượt khớp: ưu tiên lượt đã xong fold, rồi lượt mới nhất
 # Trả về: Path hoặc None
-def find_fold_directory(name, seed, fold, overrides, learning_rate, head_lr):
+def find_fold_directory(name, seed, fold, overrides, learning_rate, head_lr, route_init = "zero"):
     size, fraction = run_settings(overrides)
     candidates = []
-    for info_path, settings in matching_runs(model_directory(name, size, fraction), name, seed, learning_rate, head_lr):
+    for info_path, settings in matching_runs(model_directory(name, size, fraction, route_init), name, seed, learning_rate, head_lr, route_init):
         snapshot = settings.get("config", {})
         if all(snapshot.get(key) == value for key, value in overrides.items() if key in snapshot):
             fold_directory = info_path.parent / f"fold_{fold}"
@@ -107,7 +115,7 @@ def find_fold_directory(name, seed, fold, overrides, learning_rate, head_lr):
 
 # ============================================================
 # Tiến trình con: một (biến thể, seed, fold)
-def run_child(name, seed, fold, overrides, lr = None, head_lr = DEFAULT_HEAD_LR, init_from_size = None):
+def run_child(name, seed, fold, overrides, lr = None, head_lr = DEFAULT_HEAD_LR, init_from_size = None, route_init = "zero"):
 
     # Cấu hình chung của nghiên cứu CLIS + ghi đè, một fold
     apply_config({**config.CLIS_CONFIG, **overrides, "SEED": int(seed), "TRAIN_ALL_FOLD": False, "SELECTED_FOLD": [int(fold)]})
@@ -118,14 +126,17 @@ def run_child(name, seed, fold, overrides, lr = None, head_lr = DEFAULT_HEAD_LR,
     if lr is not None:
         protocol["optimizer_config"]["learning_rate"] = float(lr)
 
-    # Tham số mô hình: checkpointing từng khối VSS theo BLOCK_GRAD_CHECKPOINT; nguồn khởi tạo theo --init-from-size
+    # Tham số mô hình: checkpointing từng khối VSS theo BLOCK_GRAD_CHECKPOINT; khởi tạo tuyến thêm (chỉ ghi khóa khi khác "zero",
+    # nên model_kwargs của lượt mặc định giữ như các lượt cũ); nguồn khởi tạo theo --init-from-size
     kwargs = {"mixer": name, "grad_checkpoint": bool(config.BLOCK_GRAD_CHECKPOINT)}
+    if route_init != "zero":
+        kwargs["route_init"] = route_init
     if init_from_size is not None:
-        kwargs["init_from"] = str(find_checkpoint(name, seed, fold, init_from_size, float(config.TRAIN_PATIENT_FRACTION), head_lr))
+        kwargs["init_from"] = str(find_checkpoint(name, seed, fold, init_from_size, float(config.TRAIN_PATIENT_FRACTION), head_lr, route_init))
         print(f"Khởi tạo từ {kwargs['init_from']}", flush = True)
 
     # Tên mô hình (lượt trên một phần bệnh nhân: thư mục riêng)
-    model_name = vmx.model_name(name)
+    model_name = variant_name(name, route_init = route_init)
     if float(config.TRAIN_PATIENT_FRACTION) < 1:
         model_name = f"{model_name} tune{round(float(config.TRAIN_PATIENT_FRACTION) * 100)}"
     return start_train(model_name = model_name, dataset_class = NIHChestXrayDataset, model_factory = vmx.VMambaCXR, model_kwargs = kwargs, **protocol)
@@ -153,6 +164,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type = float, default = None, help = "LR backbone (mặc định learning_rate của CLIS_PROTOCOL)")
     parser.add_argument("--head-lr", type = float, default = DEFAULT_HEAD_LR, help = "LR đầu phân loại = hệ số x LR backbone")
     parser.add_argument("--init-from-size", type = int, default = None, help = "Khởi tạo từ best_model.pt cùng biến thể / seed ở độ phân giải này")
+    parser.add_argument("--route-init", choices = vmx.ROUTE_INITS, default = "zero", help = "Khởi tạo tuyến thêm của vm_clis / vm_rand (vm_ras không có tuyến thêm)")
     parser.add_argument("--set", nargs = "+", default = [], metavar = "KEY=VALUE", help = "Ghi đè hằng số config (giá trị Python, ví dụ IMAGE_SIZE=1024)")
     parser.add_argument("--min-score", type = float, default = None, help = "Cổng: mã thoát 3 nếu macro AUROC Validation trung bình qua seed của một biến thể thấp hơn ngưỡng")
     parser.add_argument("--retries", type = int, default = 2)
@@ -175,7 +187,7 @@ if __name__ == "__main__":
     if args.child is not None:
         seed, fold = args.child
         try:
-            run_child(args.names[0], int(seed), int(fold), overrides, lr = args.lr, head_lr = args.head_lr, init_from_size = args.init_from_size)
+            run_child(args.names[0], int(seed), int(fold), overrides, lr = args.lr, head_lr = args.head_lr, init_from_size = args.init_from_size, route_init = args.route_init)
         except TrainingPaused as paused:
             print(paused, flush = True)
             sys.exit(PAUSED_EXIT)
@@ -198,7 +210,7 @@ if __name__ == "__main__":
     if args.dry_run:
         for index, (name, seed) in enumerate(jobs, start = 1):
             start = "" if args.init_from_size is None else f" | khởi tạo từ {args.init_from_size} px"
-            print(f"{index:3d}. {vmx.model_name(name, run_settings(overrides)[0])} | seed {seed} | LR {learning_rate:g}, đầu x {args.head_lr:g} | fold {args.fold}{start} | {overrides or ''}")
+            print(f"{index:3d}. {variant_name(name, run_settings(overrides)[0], args.route_init)} | seed {seed} | LR {learning_rate:g}, đầu x {args.head_lr:g} | fold {args.fold}{start} | {overrides or ''}")
         sys.exit(0)
 
     # Kiểm tra môi trường một lần cho cả hàng đợi
@@ -209,13 +221,15 @@ if __name__ == "__main__":
 
     keep_system_awake()
     log(f"HÀNG ĐỢI VMAMBA {len(jobs)} việc | fold {args.fold} | LR {learning_rate:g}, đầu x {args.head_lr:g} | ghi đè {overrides or 'không'}"
-        + ("" if args.init_from_size is None else f" | khởi tạo từ {args.init_from_size} px") + ("" if args.min_score is None else f" | cổng macro_auroc >= {args.min_score:g}"))
+        + ("" if args.init_from_size is None else f" | khởi tạo từ {args.init_from_size} px") + ("" if args.route_init == "zero" else f" | tuyến thêm khởi tạo {args.route_init}")
+        + ("" if args.min_score is None else f" | cổng macro_auroc >= {args.min_score:g}"))
     selection_metric = config.CLIS_PROTOCOL["selection_metric"]
     failed, scores = [], {}
     for index, (name, seed) in enumerate(jobs, start = 1):
         command = ([sys.executable, script, name, "--child", str(seed), str(args.fold), "--head-lr", str(args.head_lr)] + (["--set", *args.set] if args.set else [])
-                   + (["--lr", str(args.lr)] if args.lr is not None else []) + (["--init-from-size", str(args.init_from_size)] if args.init_from_size is not None else []))
-        label = f"{index}/{len(jobs)} {name} | seed {seed}"
+                   + (["--lr", str(args.lr)] if args.lr is not None else []) + (["--init-from-size", str(args.init_from_size)] if args.init_from_size is not None else [])
+                   + ["--route-init", args.route_init])
+        label = f"{index}/{len(jobs)} {name}{'' if args.route_init == 'zero' else ' ' + args.route_init} | seed {seed}"
 
         # Chạy, lỗi thì chờ rồi chạy lại (tạm dừng có chủ đích không phải lỗi)
         for attempt in range(1, args.retries + 2):
@@ -232,7 +246,7 @@ if __name__ == "__main__":
             continue
 
         # Điểm Validation tốt nhất (lượt tạm dừng: tốt nhất tới epoch đã chạy), kèm mức tham gia của tuyến thêm
-        fold_directory = find_fold_directory(name, seed, args.fold, overrides, learning_rate, args.head_lr)
+        fold_directory = find_fold_directory(name, seed, args.fold, overrides, learning_rate, args.head_lr, args.route_init)
         score = None if fold_directory is None else history_score(fold_directory, selection_metric)
         if score is None or not (score["finished"] or code == PAUSED_EXIT):
             failed.append((name, seed, "không đọc được điểm"))
