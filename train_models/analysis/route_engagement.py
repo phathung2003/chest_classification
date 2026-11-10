@@ -173,6 +173,8 @@ def measure(run_directory, fold, limit, workers, device):
     group_index = {name: [classes.index(c) for c in members] for name, members in GROUPS.items()}
     row = {"run": str(run_directory.relative_to(config.MODELS_OUTPUT_DIRECTORY)).replace("\\", "/"), "mixer": kwargs["mixer"], "images": len(frame)}
     for stage, values in sorted(shares.items()):
+        if not values:                                                      # vm_ras: không có tuyến thêm
+            continue
         values = torch.cat(values).mean(dim = 0)
         row[f"share_s{stage + 1}"], row[f"mix_share_s{stage + 1}"] = float(values[0]), float(values[1])
     for mode in modes:
