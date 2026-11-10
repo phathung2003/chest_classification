@@ -106,6 +106,53 @@ def test_copy_route_init():
     raise AssertionError("Phải từ chối route_init không hợp lệ")
 
 
+# Phần trộn token (đầu ra - D·x) của tuyến thêm trên đặc trưng `features`, theo dấu tuyến "none" / "signed" của cùng một SS2D
+def extra_mixing(op, features, sign):
+    op.route_sign, op.route_cache = sign, {}
+    with torch.no_grad():
+        routes = vmx.route_outputs(op, features)
+    b, d, h, w = features.shape
+    k = op.k_group
+    mixing = routes - op.Ds.view(1, k, d, 1) * features.flatten(2)[:, None]
+    return routes, mixing[:, vmx.BASE_ROUTES:]
+
+
+# route_sign "signed": tuyến gốc không đổi, tuyến thêm quét hiệu hai nửa ảnh. Khởi tạo "zero" vẫn trùng vm_ras ở bước 0.
+# Ngữ nghĩa: tỉ lệ ||phần trộn token|| trên đặc trưng đối xứng gương / trên đặc trưng không đối xứng:
+#   - không dấu: không triệt tiêu (tỉ lệ > 0,9) ở cả CLIS lẫn cặp ngẫu nhiên (quét tổng)
+#   - có dấu: CLIS triệt tiêu mạnh (hai bên của mỗi cặp giống nhau), mạnh hơn rõ so với cặp ngẫu nhiên
+#     (cặp ngẫu nhiên cũng giảm một phần: dt khởi tạo nhỏ nên trạng thái gần như cộng dồn cả hàng, mà nửa phải là hoán vị của nửa trái)
+#   Dấu đặt sai chỗ (ví dụ đổi dấu cả B, khi đó B·u triệt tiêu dấu) làm mất triệt tiêu ở CLIS
+def test_signed_routes():
+    x = torch.randn(2, 3, SIZE, SIZE)
+    base = make("vm_ras").eval()
+    for mixer in ("vm_clis", "vm_rand"):
+        with torch.no_grad():
+            assert torch.allclose(make(mixer, route_sign = "signed").eval()(x), base(x), atol = 1e-5), f"{mixer} signed + zero: phải trùng vm_ras ở bước 0"
+
+    torch.manual_seed(3)
+    half = torch.randn(2, 96 * 4, 4, 4)
+    symmetric = torch.cat([half, half.flip(-1)], dim = -1)                    # Lưới 4 x 8 đối xứng gương
+    asymmetric = torch.cat([half, torch.randn_like(half)], dim = -1)
+    ratio = {}
+    for mixer in ("vm_clis", "vm_rand"):
+        op = make(mixer, route_init = "copy").eval().backbone.layers[2].blocks[0].op
+        for sign in ("none", "signed"):
+            routes_sym, mixing_sym = extra_mixing(op, symmetric, sign)
+            ratio[mixer, sign] = (mixing_sym.norm() / extra_mixing(op, asymmetric, sign)[1].norm()).item()
+            if sign == "none":
+                routes_none = routes_sym
+        assert torch.equal(routes_none[:, :vmx.BASE_ROUTES], routes_sym[:, :vmx.BASE_ROUTES]), "Tuyến gốc không được đổi theo dấu"
+    print("    ||trộn|| đối xứng / không đối xứng: " + ", ".join(f"{mixer} {sign} {value:.3f}" for (mixer, sign), value in ratio.items()))
+    assert ratio["vm_clis", "none"] > 0.9 and ratio["vm_rand", "none"] > 0.9, ratio
+    assert ratio["vm_clis", "signed"] < 0.35 and ratio["vm_clis", "signed"] < 0.75 * ratio["vm_rand", "signed"], ratio
+    try:
+        make("vm_clis", route_sign = "minus")
+    except ValueError:
+        return
+    raise AssertionError("Phải từ chối route_sign không hợp lệ")
+
+
 # Số tham số: vm_clis = vm_rand; chênh với vm_ras đúng bằng tham số của 2 tuyến ở các khối stage 3, 4
 def test_parameter_counts():
     sizes = {mixer: clis.count_parameters(vmx.VMambaCXR(14, mixer = mixer, pretrained = False)) for mixer in vmx.NAMES}
