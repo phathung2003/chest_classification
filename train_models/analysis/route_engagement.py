@@ -41,7 +41,6 @@ import torch
 from sklearn.metrics import roc_auc_score
 
 import config
-import models.clis_mamba as clis
 import models.vmamba_cxr as vmx
 from analysis.compare_clis import GROUPS
 from utilities.data import create_dataloader, load_dataset, transform_setting
@@ -74,25 +73,16 @@ def auroc_per_label(targets, probabilities):
 
 
 # ============================================================
-# Bản sao vmx.route_forward_core có thêm mặt nạ tuyến và đo phần đóng góp của tuyến thêm (mọi phép tính khác giữ nguyên)
+# vmx.route_forward_core có thêm mặt nạ tuyến và đo phần đóng góp của tuyến thêm (đầu ra từng tuyến lấy từ vmx.route_outputs, mọi phép tính khác giữ nguyên)
 # op.route_mask: (k,) hệ số nhân đầu ra quét của từng tuyến; op.share_log: danh sách ||tuyến thêm|| / ||tuyến gốc|| theo ảnh
 # Trả về: (b, d, h, w)
 def masked_forward_core(op, x):
     b, d, h, w = x.shape
-    k, n, r, length = op.k_group, op.d_state, op.dt_rank, h * w
-    order, inverse = vmx.route_orders(op, h, w, x.device)
+    k = op.k_group
 
-    xs = clis.RoutePermute.apply(x.flatten(2)[:, None].expand(b, k, d, length), order, inverse)
-    x_dbl = op.x_proj(xs.reshape(b, -1, length))
-    dts, Bs, Cs = torch.split(x_dbl.view(b, k, -1, length), [r, n, n], dim = 2)
-    dts = op.dt_projs(dts.contiguous().view(b, -1, length))
-    ys = vmx.vm.selective_scan_fn(xs.reshape(b, -1, length), dts.contiguous().view(b, -1, length), -op.A_logs.to(torch.float).exp(),
-                                  Bs.contiguous(), Cs.contiguous(), op.Ds.to(torch.float), op.dt_projs_bias.view(-1).to(torch.float),
-                                  True, True, backend = None if x.is_cuda else "torch")
-
-    # Hoán vị ngược từng tuyến về thứ tự raster --> đo phần đóng góp --> nhân mặt nạ --> cộng các tuyến
-    # Phần trộn token của tuyến k = đầu ra - D_k·x (D·x là nhánh tắt từng token, giống nhau ở mọi thứ tự quét)
-    routes = clis.RoutePermute.apply(ys.view(b, k, d, length), inverse, order)                  # (b, k, d, l)
+    # Đầu ra từng tuyến theo thứ tự raster --> đo phần đóng góp --> nhân mặt nạ --> cộng các tuyến
+    # Phần trộn token của tuyến k = đầu ra - D_k·x (D·x là nhánh tắt từng token, giống nhau ở mọi thứ tự quét; với tuyến có dấu: s·D·s·x = D·x)
+    routes = vmx.route_outputs(op, x)                                                           # (b, k, d, l)
     if op.share_log is not None and k > BASE:
         mixing = routes.float() - op.Ds.float().view(1, k, d, 1) * x.flatten(2).float()[:, None]
         base, extra = routes[:, :BASE].sum(1).float().flatten(1), routes[:, BASE:].sum(1).float().flatten(1)
