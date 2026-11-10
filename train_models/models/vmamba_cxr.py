@@ -36,6 +36,8 @@ from utilities.file import load_torch
 #      (cùng ý tưởng khởi tạo 0 phép chiếu ra của v2). C nhận gradient ngay từ bước đầu vì trạng thái ẩn h khác 0
 #      route_init = "copy" (2026-11-10): chép đủ cả hàng C và D, tuyến mới hoạt động ngay từ bước 0 (không còn trùng VMamba-T tiền huấn luyện).
 #      Lý do: sau huấn luyện full-data với "zero", ||tổng tuyến thêm|| chỉ bằng vài phần trăm ||tổng tuyến gốc|| (analysis/route_engagement.py)
+#      route_sign = "signed" (2026-11-10): tuyến thêm quét hiệu có dấu giữa hai nửa ảnh thay vì tổng (route_outputs). Lý do: SSM không biết token thuộc bên nào
+#      (không có positional embedding, d_state = 1, B / C chung mọi kênh) nên quét cặp gương chỉ cộng đặc trưng hai vị trí, giống cặp ngẫu nhiên
 #
 # Nhóm LR: backbone (gồm tham số 2 tuyến mới) dùng LR backbone; đầu phân loại là nhóm lớp mới (models/run_vmamba.py: hệ số m* của ConvNeXt-T)
 #
@@ -54,6 +56,7 @@ FEATURES = 768                                  # Số kênh sau stage 4 của V
 ROUTE_STAGES = (2, 3)                           # Chỉ số stage (0-3) quét bằng hoán vị gather; vm_clis / vm_rand thêm tuyến ở các stage này
 BASE_ROUTES = 4                                 # Số tuyến của VMamba
 ROUTE_INITS = ("zero", "copy")                  # Khởi tạo tuyến thêm: "zero" = hàng C và D bằng 0 (trùng VMamba-T ở bước 0); "copy" = chép đủ từ tuyến hàng
+ROUTE_SIGNS = ("none", "signed")                # Tuyến thêm quét tổng ("none") hay hiệu có dấu hai nửa ảnh ("signed", xem route_outputs)
 
 
 # ============================================================
@@ -95,37 +98,62 @@ def model_name(name, size = None):
 
 
 # ============================================================
-# Bảng hoán vị (k, l) và hoán vị ngược của một SS2D trên lưới h x w (tạo một lần cho mỗi kích thước lưới)
-# Trả về: (order, inverse)
+# Dấu theo nửa ảnh của từng token (thứ tự raster): +1 ở nửa trái (cột < w / 2), -1 ở nửa phải.
+# Cả CLIS lẫn ghép cặp ngẫu nhiên đều ghép một cột nửa trái với một cột nửa phải, nên dấu này là "phần tử thứ nhất / thứ hai của cặp" ở cả hai biến thể
+# Trả về: (h * w,)
+def side_sign(h, w):
+    return torch.where(torch.arange(h * w) % w < w // 2, 1.0, -1.0)
+
+
+# Bảng hoán vị (k, l), hoán vị ngược và dấu tuyến của một SS2D trên lưới h x w (tạo một lần cho mỗi kích thước lưới)
+# sign (k, l) theo thứ tự raster và sign_scan (k, l) theo thứ tự quét: 1 ở tuyến gốc, side_sign ở tuyến thêm khi route_sign = "signed"; None nếu không đổi dấu
+# Trả về: (order, inverse, sign, sign_scan)
 def route_orders(op, h, w, device):
     key = (h, w, str(device))
     if key not in op.route_cache:
         order = torch.stack(vmamba_routes(h, w) + EXTRA_ROUTES[op.route_variant](h, w)).to(device)
-        op.route_cache[key] = (order, torch.argsort(order, dim = 1))
+        sign = sign_scan = None
+        if getattr(op, "route_sign", "none") == "signed" and order.size(0) > BASE_ROUTES:
+            sign = torch.ones(order.shape, device = device)
+            sign[BASE_ROUTES:] = side_sign(h, w).to(device)
+            sign_scan = torch.gather(sign, 1, order)
+        op.route_cache[key] = (order, torch.argsort(order, dim = 1), sign, sign_scan)
     return op.route_cache[key]
 
 
 # Phần lõi SS2D của VMamba (forward_corev2, kiểu v05_noz: không ép FP32, đầu ra quét FP32) với cross scan thay bằng hoán vị gather theo bảng tuyến.
 # Tham số tuyến k (x_proj nhóm k, dt_projs nhóm k, dt_projs_bias[k], A_logs / Ds khối k) dùng cho hoán vị thứ k như VMamba
-# Trả về: (b, d, h, w)
-def route_forward_core(op, x):
+# route_sign = "signed": đầu vào u của phép quét ở tuyến thêm nhân dấu nửa ảnh s, đầu ra nhân lại s; dt, B, C vẫn tính từ x KHÔNG đổi dấu
+# (x_proj tuyến tính, đổi dấu cả x thì B·u triệt tiêu dấu). Với cặp (trái l, phải r) liền nhau:
+#   y_r = s_r·C_r·h_r + D·x_r,  h_r = a·dt_l·B_l·x_l - dt_r·B_r·x_r  -->  y_r = C_r·(dt_r·B_r·x_r - a·dt_l·B_l·x_l) + D·x_r   (hiệu hai bên thay vì tổng)
+# Trả về: (b, k, d, h * w) đầu ra từng tuyến theo thứ tự raster, trước khi cộng
+def route_outputs(op, x):
     b, d, h, w = x.shape
     k, n, r, length = op.k_group, op.d_state, op.dt_rank, h * w
-    order, inverse = route_orders(op, h, w, x.device)
+    order, inverse, sign, sign_scan = route_orders(op, h, w, x.device)
 
     # Chuỗi theo từng tuyến --> chiếu ra dt, B, C theo nhóm tuyến
     xs = clis.RoutePermute.apply(x.flatten(2)[:, None].expand(b, k, d, length), order, inverse)        # (b, k, d, l)
     x_dbl = op.x_proj(xs.reshape(b, -1, length))
     dts, Bs, Cs = torch.split(x_dbl.view(b, k, -1, length), [r, n, n], dim = 2)
     dts = op.dt_projs(dts.contiguous().view(b, -1, length))
+    us = xs if sign_scan is None else xs * sign_scan.view(1, k, 1, length).to(xs.dtype)
 
     # Selective scan một lần cho mọi tuyến (kernel mamba-ssm trên GPU; bản PyTorch của VMamba trên CPU)
-    ys = vm.selective_scan_fn(xs.reshape(b, -1, length), dts.contiguous().view(b, -1, length), -op.A_logs.to(torch.float).exp(),
+    ys = vm.selective_scan_fn(us.reshape(b, -1, length), dts.contiguous().view(b, -1, length), -op.A_logs.to(torch.float).exp(),
                               Bs.contiguous(), Cs.contiguous(), op.Ds.to(torch.float), op.dt_projs_bias.view(-1).to(torch.float),
                               True, True, backend = None if x.is_cuda else "torch")
 
-    # Hoán vị ngược về thứ tự raster --> cộng các tuyến --> LayerNorm đầu ra như VMamba
-    y = clis.RoutePermute.apply(ys.view(b, k, d, length), inverse, order).sum(1).view(b, d, h, w)
+    # Hoán vị ngược về thứ tự raster (đổi dấu lại nếu có)
+    routes = clis.RoutePermute.apply(ys.view(b, k, d, length), inverse, order)
+    return routes if sign is None else routes * sign.view(1, k, 1, length).to(routes.dtype)
+
+
+# Cộng các tuyến --> LayerNorm đầu ra như VMamba
+# Trả về: (b, d, h, w)
+def route_forward_core(op, x):
+    b, d, h, w = x.shape
+    y = route_outputs(op, x).sum(1).view(b, d, h, w)
     return op.out_norm(y).to(x.dtype)
 
 
@@ -184,7 +212,7 @@ def imagenet_state():
 # Mô hình đầy đủ
 class VMambaCXR(nn.Module):
     def __init__(self, num_classes, mixer = "vm_clis", route_stages = ROUTE_STAGES, extra_routes = 2, drop_path_rate = 0.0,
-                 grad_checkpoint = False, pretrained = True, init_from = None, route_init = "zero"):
+                 grad_checkpoint = False, pretrained = True, init_from = None, route_init = "zero", route_sign = "none"):
         super().__init__()
 
         # Kiểm tra biến thể và cách khởi tạo tuyến thêm
@@ -192,6 +220,8 @@ class VMambaCXR(nn.Module):
             raise ValueError(f"Biến thể '{mixer}' không hợp lệ: {list(NAMES)}")
         if route_init not in ROUTE_INITS:
             raise ValueError(f"route_init '{route_init}' không hợp lệ: {list(ROUTE_INITS)}")
+        if route_sign not in ROUTE_SIGNS:
+            raise ValueError(f"route_sign '{route_sign}' không hợp lệ: {list(ROUTE_SIGNS)}")
         self.mixer = mixer
         self.grad_checkpoint = bool(grad_checkpoint)
 
@@ -208,7 +238,7 @@ class VMambaCXR(nn.Module):
         for stage in self.route_stages:
             for block in self.backbone.layers[stage].blocks:
                 op = block.op
-                op.route_variant, op.route_cache = mixer, {}
+                op.route_variant, op.route_sign, op.route_cache = mixer, route_sign, {}
                 add_routes(op, extra, route_init)
                 op.forward_core = partial(route_forward_core, op)
 
