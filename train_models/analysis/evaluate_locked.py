@@ -38,6 +38,8 @@ import models.clis_mamba as clis
 import models.clis_mamba_v2 as v2
 import models.convnext_tiny as convnext
 import models.densenet121 as densenet
+import models.stitch_cxr as stx
+import models.vmamba_cxr as vmx
 from training.evaluate import evaluate
 from utilities.data import create_dataloader, load_dataset, transform_setting
 from utilities.dataset import NIHChestXrayDataset
@@ -136,6 +138,11 @@ def build_model(settings, number_of_classes):
     if model_name.startswith("CLIS-Mamba v2"):                                 # v2 (models/clis_mamba_v2.py): đóng băng chỉ có nghĩa lúc huấn luyện
         kwargs.pop("freeze_backbone", None)
         return v2.CLISMambaV2(num_classes = number_of_classes, pretrained = False, **kwargs)
+    if model_name.startswith(vmx.MODEL_NAME):                                  # VMamba-T CXR (models/vmamba_cxr.py): tuyến thêm dựng theo model_kwargs rồi nạp trọng số đã huấn luyện
+        return vmx.VMambaCXR(num_classes = number_of_classes, pretrained = False, **{**kwargs, "grad_checkpoint": False})
+    if model_name.startswith(stx.MODEL_NAME):                                  # Mô hình lai ghép tầng (models/stitch_cxr.py): lớp nối đã huấn luyện nằm trong best_model.pt, không cần tệp lớp nối
+        kwargs.pop("pinned_sha256", None)                                       # Mã đổi sau huấn luyện được phát hiện bằng bước kiểm chứng --split validation, không bằng SHA-256 đã ghim
+        return stx.StitchCXR(num_classes = number_of_classes, pretrained = False, **{**kwargs, "grad_checkpoint": False})
     return clis.CLISMamba(num_classes = number_of_classes, pretrained = False, **kwargs)
 
 
