@@ -69,8 +69,8 @@ def variant_name(name, size = None, route_init = "zero", route_sign = "none"):
 
 # Thư mục kết quả của một biến thể ở một độ phân giải (lượt trên một phần bệnh nhân: hậu tố tune<phần trăm>)
 # Trả về: Path
-def model_directory(name, size, fraction = 1.0, route_init = "zero", route_sign = "none"):
-    model_name = variant_name(name, size, route_init, route_sign) + (f" tune{round(fraction * 100)}" if fraction < 1 else "")
+def model_directory(name, size, fraction = 1.0, route_init = "zero", route_sign = "none", tag = ""):
+    model_name = variant_name(name, size, route_init, route_sign) + (f" tune{round(fraction * 100)}" if fraction < 1 else "") + (f" {tag}" if tag else "")
     dataset_name = read_json(config.DATASET_INFO_DIRECTORY)["dataset_name"]
     return config.MODELS_OUTPUT_DIRECTORY / to_snake_case(dataset_name) / to_snake_case(model_name)
 
@@ -106,8 +106,9 @@ def find_checkpoint(name, seed, fold, size, fraction, head_lr, route_init = "zer
 # Trả về: Path hoặc None
 def find_fold_directory(name, seed, fold, overrides, learning_rate, head_lr, route_init = "zero", route_sign = "none"):
     size, fraction = run_settings(overrides)
+    tag = str({**config.CLIS_CONFIG, **overrides}.get("RUN_TAG", config.RUN_TAG))
     candidates = []
-    for info_path, settings in matching_runs(model_directory(name, size, fraction, route_init, route_sign), name, seed, learning_rate, head_lr, route_init, route_sign):
+    for info_path, settings in matching_runs(model_directory(name, size, fraction, route_init, route_sign, tag), name, seed, learning_rate, head_lr, route_init, route_sign):
         snapshot = settings.get("config", {})
         if all(snapshot.get(key) == value for key, value in overrides.items() if key in snapshot):
             fold_directory = info_path.parent / f"fold_{fold}"
@@ -135,6 +136,8 @@ def run_child(name, seed, fold, overrides, lr = None, head_lr = DEFAULT_HEAD_LR,
         kwargs["route_init"] = route_init
     if route_sign != "none":
         kwargs["route_sign"] = route_sign
+    if float(config.DROP_PATH_RATE) > 0:
+        kwargs["drop_path_rate"] = float(config.DROP_PATH_RATE)                     # Chỉ ghi khi > 0: model_kwargs của lượt cũ giữ nguyên
     if init_from_size is not None:
         kwargs["init_from"] = str(find_checkpoint(name, seed, fold, init_from_size, float(config.TRAIN_PATIENT_FRACTION), head_lr, route_init, route_sign))
         print(f"Khởi tạo từ {kwargs['init_from']}", flush = True)
@@ -143,6 +146,8 @@ def run_child(name, seed, fold, overrides, lr = None, head_lr = DEFAULT_HEAD_LR,
     model_name = variant_name(name, route_init = route_init, route_sign = route_sign)
     if float(config.TRAIN_PATIENT_FRACTION) < 1:
         model_name = f"{model_name} tune{round(float(config.TRAIN_PATIENT_FRACTION) * 100)}"
+    if config.RUN_TAG:
+        model_name = f"{model_name} {config.RUN_TAG}"
     return start_train(model_name = model_name, dataset_class = NIHChestXrayDataset, model_factory = vmx.VMambaCXR, model_kwargs = kwargs, **protocol)
 
 

@@ -73,8 +73,8 @@ def variant_name(layout, size = None, stitch_init = DEFAULT_STITCH):
 
 # Thư mục kết quả của một layout ở một độ phân giải (lượt trên một phần bệnh nhân: hậu tố tune<phần trăm>)
 # Trả về: Path
-def model_directory(layout, size, fraction = 1.0, stitch_init = DEFAULT_STITCH):
-    model_name = variant_name(layout, size, stitch_init) + (f" tune{round(fraction * 100)}" if fraction < 1 else "")
+def model_directory(layout, size, fraction = 1.0, stitch_init = DEFAULT_STITCH, tag = ""):
+    model_name = variant_name(layout, size, stitch_init) + (f" tune{round(fraction * 100)}" if fraction < 1 else "") + (f" {tag}" if tag else "")
     dataset_name = read_json(config.DATASET_INFO_DIRECTORY)["dataset_name"]
     return config.MODELS_OUTPUT_DIRECTORY / to_snake_case(dataset_name) / to_snake_case(model_name)
 
@@ -121,8 +121,9 @@ def find_checkpoint(layout, seed, fold, size, fraction, head_lr, stitch_init = D
 # Trả về: Path hoặc None
 def find_fold_directory(layout, seed, fold, overrides, learning_rate, head_lr, stitch_init = DEFAULT_STITCH):
     size, fraction = run_settings(overrides)
+    tag = str({**config.CLIS_CONFIG, **overrides}.get("RUN_TAG", config.RUN_TAG))
     candidates = []
-    for info_path, settings in matching_runs(model_directory(layout, size, fraction, stitch_init), layout, seed, learning_rate, head_lr, stitch_init):
+    for info_path, settings in matching_runs(model_directory(layout, size, fraction, stitch_init, tag), layout, seed, learning_rate, head_lr, stitch_init):
         snapshot = settings.get("config", {})
         if all(snapshot.get(key) == value for key, value in overrides.items() if key in snapshot):
             fold_directory = info_path.parent / f"fold_{fold}"
@@ -146,6 +147,8 @@ def run_child(layout, seed, fold, overrides, lr = None, head_lr = DEFAULT_HEAD_L
     # Tham số mô hình: layout, khởi tạo lớp nối, SHA-256 của mã VMamba CXR và các tệp lớp nối, checkpointing từng khối VSS theo BLOCK_GRAD_CHECKPOINT; nguồn khởi tạo theo --init-from-size
     kwargs = {"layout": layout, "stitch_init": stitch_init, "grad_checkpoint": bool(config.BLOCK_GRAD_CHECKPOINT),
               "pinned_sha256": {stx.VMAMBA_SOURCE.name: sha256_file(stx.VMAMBA_SOURCE), **stitch_hashes(layout, stitch_init)}}
+    if float(config.DROP_PATH_RATE) > 0:
+        kwargs["drop_path_rate"] = float(config.DROP_PATH_RATE)                     # Chỉ ghi khi > 0: model_kwargs của lượt cũ giữ nguyên
     if init_from_size is not None:
         kwargs["init_from"] = str(find_checkpoint(layout, seed, fold, init_from_size, float(config.TRAIN_PATIENT_FRACTION), head_lr, stitch_init))
         print(f"Khởi tạo từ {kwargs['init_from']}", flush = True)
@@ -154,6 +157,8 @@ def run_child(layout, seed, fold, overrides, lr = None, head_lr = DEFAULT_HEAD_L
     model_name = variant_name(layout, stitch_init = stitch_init)
     if float(config.TRAIN_PATIENT_FRACTION) < 1:
         model_name = f"{model_name} tune{round(float(config.TRAIN_PATIENT_FRACTION) * 100)}"
+    if config.RUN_TAG:
+        model_name = f"{model_name} {config.RUN_TAG}"
     return start_train(model_name = model_name, dataset_class = NIHChestXrayDataset, model_factory = stx.StitchCXR, model_kwargs = kwargs, **protocol)
 
 

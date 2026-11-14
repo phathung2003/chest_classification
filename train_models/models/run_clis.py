@@ -101,9 +101,16 @@ def run_child(name, seed, fold, lr_multiplier, overrides, lr = None, init_from_s
         if init_from_size is not None:
             raise SystemExit("--init-from-size chỉ dùng cho các biến thể CLIS-Mamba")
         base_name, factory, kwargs = BASELINES[name]
+        kwargs = dict(kwargs)
         model_name = f"{base_name} CLIS {config.IMAGE_SIZE}px"
+        if float(config.DROP_PATH_RATE) > 0:
+            if name != "convnext_t":
+                raise SystemExit(f"DROP_PATH_RATE > 0 chỉ dùng cho convnext_t ({name} không có nhánh dư để bỏ)")
+            kwargs["drop_path_rate"] = float(config.DROP_PATH_RATE)                 # Chỉ ghi khi > 0: model_kwargs của lượt cũ giữ nguyên
     else:
         model_name, factory, kwargs = clis.model_name(name), clis.CLISMamba, dict(clis.VARIANTS[name])
+        if float(config.DROP_PATH_RATE) > 0:
+            raise SystemExit("DROP_PATH_RATE > 0 chưa hỗ trợ cho các biến thể CLIS-Mamba v1")
         kwargs["grad_checkpoint"] = bool(config.BLOCK_GRAD_CHECKPOINT)            # Checkpointing 4 khối MetaFormer: cùng phép tính, chỉ đổi VRAM / tốc độ
         if init_from_size is not None:
             kwargs["init_from"] = str(find_checkpoint(name, seed, fold, init_from_size))
@@ -112,6 +119,8 @@ def run_child(name, seed, fold, lr_multiplier, overrides, lr = None, init_from_s
     # Lượt tinh chỉnh trên một phần bệnh nhân: thư mục kết quả riêng (find_checkpoint không lấy nhầm làm điểm khởi đầu)
     if float(config.TRAIN_PATIENT_FRACTION) < 1:
         model_name = f"{model_name} tune{round(float(config.TRAIN_PATIENT_FRACTION) * 100)}"
+    if config.RUN_TAG:
+        model_name = f"{model_name} {config.RUN_TAG}"
     return start_train(model_name = model_name, dataset_class = NIHChestXrayDataset, model_factory = factory, model_kwargs = kwargs, **protocol)
 
 
@@ -129,6 +138,9 @@ def model_directory(name, overrides):
     fraction = float(overrides.get("TRAIN_PATIENT_FRACTION", config.CLIS_CONFIG.get("TRAIN_PATIENT_FRACTION", config.TRAIN_PATIENT_FRACTION)))
     if fraction < 1:
         model_name = f"{model_name} tune{round(fraction * 100)}"
+    tag = str(overrides.get("RUN_TAG", config.CLIS_CONFIG.get("RUN_TAG", config.RUN_TAG)))
+    if tag:
+        model_name = f"{model_name} {tag}"
     dataset_name = read_json(config.DATASET_INFO_DIRECTORY)["dataset_name"]
     return config.MODELS_OUTPUT_DIRECTORY / to_snake_case(dataset_name) / to_snake_case(model_name)
 

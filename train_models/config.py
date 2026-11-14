@@ -45,6 +45,8 @@ GRAD_CLIP_NORM              = None                                              
 USE_AMP                     = True                                                                      # Huấn luyện mixed precision trên GPU (kiểu AMP_DTYPE)
 AMP_DTYPE                   = "float16"                                                                 # Kiểu AMP: float16 (kèm GradScaler) | bfloat16 (cùng dải số với FP32, không cần GradScaler)
 BLOCK_GRAD_CHECKPOINT       = True                                                                      # Gradient checkpointing từng khối trộn token của CLIS-Mamba (tính lại forward khi backward): cùng phép tính, giảm VRAM, chậm hơn; vào chữ ký qua model_kwargs
+DROP_PATH_RATE              = 0.0                                                                       # Stochastic depth của backbone (ConvNeXt-T, VMamba-T, ccmm; models/run_clis.py, run_vmamba.py, run_stitch.py): > 0 thì ghi vào model_kwargs; 0 giữ model_kwargs như các lượt cũ
+RUN_TAG                     = ""                                                                        # Hậu tố tên mô hình / thư mục kết quả (ví dụ "r2": công thức chống overfit R2), tách lượt khỏi thư mục của công thức cũ; "" = không hậu tố
 EMA_DECAY                   = 0.9995                                                                    # EMA trọng số: hệ số tối đa (khởi động (1 + n) / (10 + n)); Validation, chọn và lưu mô hình bằng trọng số EMA; None = tắt
 PATIENCE                    = 5                                                                         # Early stopping: số epoch không cải thiện tối đa
 MIN_DELTA                   = 0                                                                         # Early stopping: mức cải thiện tối thiểu

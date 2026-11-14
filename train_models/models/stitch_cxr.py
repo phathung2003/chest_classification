@@ -77,7 +77,7 @@ def stitch_path(source, target, stage):
 # ============================================================
 # Mô hình đầy đủ
 class StitchCXR(nn.Module):
-    def __init__(self, num_classes, layout = "ccmm", stitch_init = "lstsq", pinned_sha256 = None, grad_checkpoint = False, pretrained = True, init_from = None):
+    def __init__(self, num_classes, layout = "ccmm", stitch_init = "lstsq", pinned_sha256 = None, grad_checkpoint = False, pretrained = True, init_from = None, drop_path_rate = 0.0):
         super().__init__()
 
         # Kiểm tra layout, cách khởi tạo lớp nối và mã VMamba CXR đã ghim
@@ -93,8 +93,9 @@ class StitchCXR(nn.Module):
         load_imagenet = bool(pretrained) and init_from is None
 
         # 1. Hai backbone tiền huấn luyện ImageNet; SS2D ở stage 3, 4 của VMamba quét bằng hoán vị gather như vm_ras
-        self.cnn = timm.create_model("convnext_tiny.fb_in1k", pretrained = load_imagenet, num_classes = 0)
-        self.mamba = vmx.VMambaCXR(num_classes, mixer = "vm_ras", pretrained = load_imagenet).backbone
+        #    Stochastic depth: mỗi backbone giữ lịch tuyến tính gốc của nó (tính trên đủ 4 stage), khối bị bỏ ở bước 2 không dùng tỉ lệ của mình
+        self.cnn = timm.create_model("convnext_tiny.fb_in1k", pretrained = load_imagenet, num_classes = 0, drop_path_rate = drop_path_rate)
+        self.mamba = vmx.VMambaCXR(num_classes, mixer = "vm_ras", pretrained = load_imagenet, drop_path_rate = drop_path_rate).backbone
 
         # 2. Bỏ các khối không nằm trên đường đi của layout
         for stage, family in enumerate(layout):
