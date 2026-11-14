@@ -89,6 +89,26 @@ def find_checkpoint(name, seed, fold, size):
     return matches[0]
 
 
+# best_model.pt của lượt baseline cùng seed ở độ phân giải `size`, cùng RUN_TAG và DROP_PATH_RATE hiện tại, LR mặc định của CLIS_PROTOCOL,
+# hệ số LR lớp mới m*, đã xong fold (điểm khởi đầu khi tinh chỉnh ở độ phân giải cao hơn). Phải tìm thấy đúng một lượt
+def baseline_checkpoint(name, seed, fold, size):
+    directory = model_directory(name, {"IMAGE_SIZE": int(size), "RUN_TAG": config.RUN_TAG, "TRAIN_PATIENT_FRACTION": config.TRAIN_PATIENT_FRACTION})
+    multiplier = default_lr_multiplier(name)
+    learning_rate = float(config.CLIS_PROTOCOL["optimizer_config"]["learning_rate"])
+    matches = []
+    for info_path in sorted(directory.glob("run_*/train_info.json")):
+        settings = read_json(info_path).get("settings", {})
+        optimizer = settings.get("training_config", {}).get("optimizer", {})
+        if (settings.get("seed") == int(seed) and settings.get("image_size") == int(size)
+                and float(settings.get("model_kwargs", {}).get("drop_path_rate", 0.0)) == float(config.DROP_PATH_RATE)
+                and optimizer.get("new_module_lr_multiplier") == multiplier and optimizer.get("learning_rate") == learning_rate
+                and (info_path.parent / f"fold_{fold}" / "fold_done.json").is_file()):
+            matches.append(info_path.parent / f"fold_{fold}" / "best_model.pt")
+    if len(matches) != 1:
+        raise SystemExit(f"Cần đúng một lượt {name} | seed {seed} | {size} px | drop path {float(config.DROP_PATH_RATE):g} đã xong fold {fold} trong {directory}, tìm thấy {len(matches)}")
+    return matches[0]
+
+
 # ============================================================
 # Tiến trình con: một (mô hình, seed, fold) với giao thức CLIS (lr_multiplier None: m* của mô hình)
 def run_child(name, seed, fold, lr_multiplier, overrides, lr = None, init_from_size = None):
@@ -98,8 +118,8 @@ def run_child(name, seed, fold, lr_multiplier, overrides, lr = None, init_from_s
     if lr is not None:
         protocol["optimizer_config"]["learning_rate"] = float(lr)
     if name in BASELINES:
-        if init_from_size is not None:
-            raise SystemExit("--init-from-size chỉ dùng cho các biến thể CLIS-Mamba")
+        if init_from_size is not None and name != "convnext_t":
+            raise SystemExit("--init-from-size chỉ dùng cho convnext_t và các biến thể CLIS-Mamba")
         base_name, factory, kwargs = BASELINES[name]
         kwargs = dict(kwargs)
         model_name = f"{base_name} CLIS {config.IMAGE_SIZE}px"
@@ -107,6 +127,9 @@ def run_child(name, seed, fold, lr_multiplier, overrides, lr = None, init_from_s
             if name != "convnext_t":
                 raise SystemExit(f"DROP_PATH_RATE > 0 chỉ dùng cho convnext_t ({name} không có nhánh dư để bỏ)")
             kwargs["drop_path_rate"] = float(config.DROP_PATH_RATE)                 # Chỉ ghi khi > 0: model_kwargs của lượt cũ giữ nguyên
+        if init_from_size is not None:
+            kwargs["init_from"] = str(baseline_checkpoint(name, seed, fold, init_from_size))
+            print(f"Khởi tạo từ {kwargs['init_from']}")
     else:
         model_name, factory, kwargs = clis.model_name(name), clis.CLISMamba, dict(clis.VARIANTS[name])
         if float(config.DROP_PATH_RATE) > 0:

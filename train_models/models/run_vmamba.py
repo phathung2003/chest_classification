@@ -92,9 +92,9 @@ def matching_runs(directory, name, seed, learning_rate, head_lr, route_init = "z
 
 # best_model.pt của lượt cùng biến thể / seed ở độ phân giải `size` (LR mặc định của CLIS_PROTOCOL), đã xong fold. Phải có đúng một lượt
 # Trả về: Path
-def find_checkpoint(name, seed, fold, size, fraction, head_lr, route_init = "zero", route_sign = "none"):
+def find_checkpoint(name, seed, fold, size, fraction, head_lr, route_init = "zero", route_sign = "none", tag = ""):
     learning_rate = float(config.CLIS_PROTOCOL["optimizer_config"]["learning_rate"])
-    directory = model_directory(name, size, fraction, route_init, route_sign)
+    directory = model_directory(name, size, fraction, route_init, route_sign, tag)
     matches = [info_path.parent / f"fold_{fold}" / "best_model.pt" for info_path, settings in matching_runs(directory, name, seed, learning_rate, head_lr, route_init, route_sign)
                if settings.get("image_size") == int(size) and (info_path.parent / f"fold_{fold}" / "fold_done.json").is_file()]
     if len(matches) != 1:
@@ -139,7 +139,7 @@ def run_child(name, seed, fold, overrides, lr = None, head_lr = DEFAULT_HEAD_LR,
     if float(config.DROP_PATH_RATE) > 0:
         kwargs["drop_path_rate"] = float(config.DROP_PATH_RATE)                     # Chỉ ghi khi > 0: model_kwargs của lượt cũ giữ nguyên
     if init_from_size is not None:
-        kwargs["init_from"] = str(find_checkpoint(name, seed, fold, init_from_size, float(config.TRAIN_PATIENT_FRACTION), head_lr, route_init, route_sign))
+        kwargs["init_from"] = str(find_checkpoint(name, seed, fold, init_from_size, float(config.TRAIN_PATIENT_FRACTION), head_lr, route_init, route_sign, config.RUN_TAG))
         print(f"Khởi tạo từ {kwargs['init_from']}", flush = True)
 
     # Tên mô hình (lượt trên một phần bệnh nhân: thư mục riêng)

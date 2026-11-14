@@ -26,10 +26,15 @@ MODEL_NAME = "ConvNeXt-T Baseline_v1"
 class ConvNeXtTinyBaseline(nn.Module):
     PRETRAINED_MODULES = ("cnn",)                                  # Khối dùng trọng số ImageNet (nhóm LR backbone)
 
-    def __init__(self, num_classes, pretrained = True, drop_path_rate = 0.0):
+    def __init__(self, num_classes, pretrained = True, drop_path_rate = 0.0, init_from = None):
         super().__init__()
-        self.cnn = timm.create_model("convnext_tiny.fb_in1k", pretrained = pretrained, num_classes = 0, drop_path_rate = drop_path_rate)   # Stochastic depth tăng tuyến tính tới drop_path_rate ở khối cuối (timm)
+        self.cnn = timm.create_model("convnext_tiny.fb_in1k", pretrained = pretrained and init_from is None, num_classes = 0, drop_path_rate = drop_path_rate)   # Stochastic depth tăng tuyến tính tới drop_path_rate ở khối cuối (timm)
         self.classifier = nn.Linear(self.cnn.num_features, num_classes)
+
+        # Khởi tạo từ best_model.pt của lượt ConvNeXt-T khác (ví dụ 512 px khi tinh chỉnh ở 1024 px)
+        if init_from is not None:
+            from utilities.file import load_torch
+            self.load_state_dict(load_torch(init_from)["model_state_dict"], strict = True)
 
     def forward(self, x):
         return self.classifier(self.cnn(x))                        # cnn: [B, 768] sau GAP + LayerNorm
