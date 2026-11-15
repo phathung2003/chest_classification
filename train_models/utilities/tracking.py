@@ -31,12 +31,20 @@ PIPELINE_SOURCE_FILES = ("training/*.py", "utilities/data.py", "utilities/datase
 # Cài đặt trong config.py không đưa vào chữ ký (BLOCK_GRAD_CHECKPOINT: Vào chữ ký qua model_kwargs của các biến thể CLIS-Mamba, mô hình khác không dùng;
 # CLIS_LR_MULTIPLIER: hệ số của mô hình đang chạy vào chữ ký qua training_config, sửa hệ số của mô hình khác không đổi chữ ký)
 CONFIG_EXCLUDED = {"ROOT_DIRECTORY", "ORIGINAL_DATASET_DIRECTORY", "DATASET_DIRECTORY", "FOLDS_DIRECTORY", "TRAIN_FOLDS_DIRECTORY", "TEST_DIRECTORY", "DATASET_INFO_DIRECTORY", "MODELS_OUTPUT_DIRECTORY", "TRAIN_ALL_FOLD", "SELECTED_FOLD", "RESUME_TRAINING", "PAUSE_AFTER_EPOCH", "BLOCK_GRAD_CHECKPOINT", "REQUIRE_CLEAN_GIT", "NUMBER_OF_WORKERS", "PREFETCH_FACTOR", "PERSISTENT_WORKERS", "PROGRESS_SYNC_STEPS", "IMAGE_EXTENSION", "COMPARE_BOOTSTRAP_ITERATION", "INFERENCE_WARMUP_STEPS", "INFERENCE_TIMED_STEPS", "CONSOLE_WIDTH", "GPU_MONITOR_INTERVAL", "MIN_RESULT_WIDTH", "MIN_TITLE_WIDTH", "MIN_MESSAGE_WIDTH", "MIN_NUMBER_WIDTH", "EXPERIMENT_PROTOCOL", "CLIS_CONFIG", "CLIS_PROTOCOL", "CLIS_LR_MULTIPLIER"}
+CONFIG_OPTIONAL_NONE = {"GAMMA"}                # Chỉ vào chữ ký khi khác None
 
 # ============================================================
 # Chụp mọi hằng số config.py ảnh hưởng tới kết quả
 # Trả về: dict {tên hằng số: giá trị}, sắp xếp theo tên
 def config_snapshot():
-    return {name: getattr(config, name) for name in sorted(dir(config)) if name.isupper() and name not in CONFIG_EXCLUDED}
+    snapshot = {name: getattr(config, name) for name in sorted(dir(config)) if name.isupper() and name not in CONFIG_EXCLUDED}
+
+    # Hằng số tùy chọn thêm sau: bỏ khỏi chữ ký khi đang tắt (None), để chữ ký các lượt cũ không đổi
+    for name in CONFIG_OPTIONAL_NONE:
+        if snapshot.get(name, 0) is None:
+            del snapshot[name]
+
+    return snapshot
 
 # ============================================================
 # Hash SHA-256 của dữ liệu JSON
@@ -133,6 +141,7 @@ def make_signature(model_name, model_factory, model_kwargs, dataset_name, datase
             "scale"                 : config.SCALE,
             "brightness"            : config.BRIGHTNESS,
             "contrast"              : config.CONTRAST,
+            **({"gamma": config.GAMMA} if config.GAMMA is not None else {}),    # Chỉ ghi khi bật: chữ ký các lượt không dùng gamma giữ nguyên
             "normalize_mean"        : config.TRANSFORM_NORMALIZE_MEAN,
             "normalize_std"         : config.TRANSFORM_NORMALIZE_STD,
         },

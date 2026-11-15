@@ -80,6 +80,7 @@ TRANSLATE                   = (0.02, 0.02)                                      
 SCALE                       = (0.95, 1.05)                                                              # Khoảng phóng to / thu nhỏ
 BRIGHTNESS                  = 0.10                                                                      # Biên độ thay đổi độ sáng
 CONTRAST                    = 0.10                                                                      # Biên độ thay đổi độ tương phản
+GAMMA                       = None                                                                      # Khoảng hệ số gamma (lo, hi), lấy đều theo log; None = tắt (chữ ký các lượt cũ không đổi)
 TRANSFORM_NORMALIZE_MEAN    = [0.485, 0.456, 0.406]                                                     # Chuẩn hóa theo ImageNet
 TRANSFORM_NORMALIZE_STD     = [0.229, 0.224, 0.225]                                                     # Độ lệch chuẩn theo ImageNet (cùng thứ tự kênh R, G, B với TRANSFORM_NORMALIZE_MEAN)
 

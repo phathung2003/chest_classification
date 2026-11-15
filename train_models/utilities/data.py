@@ -214,6 +214,27 @@ def validate_data(train_df, test_df, classes, number_of_folds):
         )
 
 # ============================================================
+# Biến đổi gamma ngẫu nhiên trên tensor [0, 1]: x^g, log g ~ U(log lo, log hi)
+# Lấy theo log nên (0.8, 1.25) đối xứng quanh g = 1; dùng RNG của torch như các phép torchvision (cùng chính sách seed theo ảnh)
+class RandomGamma(torch.nn.Module):
+
+    # Khởi tạo
+    def __init__(self, gamma_range):
+        super().__init__()
+        low, high = (float(value) for value in gamma_range)
+        if not 0 < low <= high:
+            raise ValueError(
+                "[RandomGamma]: GAMMA phải là (lo, hi) với 0 < lo <= hi.\n"
+                f"Nhận được: {gamma_range}"
+            )
+        self.log_low, self.log_high = float(np.log(low)), float(np.log(high))
+
+    # Áp dụng
+    def forward(self, image):
+        gamma = float(torch.empty(1).uniform_(self.log_low, self.log_high).exp())
+        return image.clamp(0, 1).pow(gamma)
+
+# ============================================================
 # Biến đổi ảnh
 # Trả về: (train_transform, eval_transform)
 def transform_setting():
@@ -227,6 +248,7 @@ def transform_setting():
         *flip,
         transforms.RandomAffine(degrees = config.DEGREES, translate = config.TRANSLATE, scale = config.SCALE, fill = 0, interpolation = InterpolationMode.BILINEAR),
         transforms.ToTensor(),
+        *([RandomGamma(config.GAMMA)] if config.GAMMA is not None else []),
         transforms.ColorJitter(brightness = config.BRIGHTNESS, contrast = config.CONTRAST),
         normalize,
     ])
