@@ -1,6 +1,6 @@
 # ============================================================
 # Hàm Loss cho phân loại đa nhãn (Multi-label Loss)
-# Mục tiêu: Kiểm tra cấu hình và xây dựng hàm Loss: BCE, BCE theo CheXNet, Focal, Asymmetric (ASL).
+# Mục tiêu: Kiểm tra cấu hình và xây dựng hàm Loss: BCE, BCE theo CheXNet, Focal, Asymmetric (ASL); điều chuẩn NVUM cho BCE khi nhãn nhiễu.
 # ============================================================
 
 import math
@@ -100,7 +100,104 @@ def build_loss(loss_config, train_df, classes, device):
     elif name == "asl":
         criterion, metadata = build_asymmetric_loss(loss_config)
     
+    # Điều chuẩn NVUM (config.NVUM khác None): Bọc hàm Loss BCE
+    if config.NVUM is not None:
+        criterion, metadata = build_nvum(criterion, metadata, name, train_df, classes)
+
     return criterion.to(device), metadata
+
+# ============================================================
+# Hàm Loss: BCE + điều chuẩn NVUM (Non-Volatile Unbiased Memory; Liu et al., MICCAI 2022, arXiv 2103.04053) cho nhãn nhiễu
+# - Bộ nhớ t[ảnh, lớp] (khởi tạo 0) là trung bình trượt của logit đã trừ log tần suất lớp: t <- beta * t + (1 - beta) * (z - log pi),
+#   cập nhật mỗi lần ảnh được duyệt, trước khi tính Loss, không truyền gradient.
+# - Loss = BCE + weight * trung bình theo (ảnh, lớp) của log(1 - sigmoid(t * p)), p = sigmoid(z) chặn trong [1e-4, 1 - 1e-4]
+#   (dạng theo từng lớp và các hằng số của mã công bố github.com/FBLADL/NVUM, models/loss.py).
+# - Khác mã công bố ở hai điểm: bộ nhớ lấy logit của chính mô hình đang huấn luyện (công thức 3 của bài báo), không dùng forward
+#   thứ hai của mô hình EMA; không trộn bộ nhớ giữa các ảnh trong batch.
+# - Gọi không kèm chỉ số ảnh (Validation, Test): trả về BCE, bộ nhớ không đổi --> validation_loss so được với lượt không dùng NVUM.
+class NVUMLoss(nn.Module):
+
+    needs_indices = True                                                        # train_one_epoch truyền chỉ số ảnh của batch
+
+    # Khởi tạo
+    def __init__(self, base, prior, num_samples, weight, beta):
+        super().__init__()
+        self.base   = base                                                      # Hàm Loss BCE gốc
+        self.weight = float(weight)                                             # Hệ số điều chuẩn
+        self.beta   = float(beta)                                               # Hệ số trung bình trượt của bộ nhớ
+        prior       = torch.as_tensor(np.asarray(prior), dtype = torch.float32)
+        self.register_buffer("log_prior", prior.log())                          # log tần suất dương tính của từng lớp
+        self.register_buffer("memory", torch.zeros(int(num_samples), prior.numel()))    # Lưu cùng checkpoint (criterion_state_dict)
+
+    def forward(self, logits, targets, indices = None):
+
+        # BCE gốc
+        loss = self.base(logits, targets)
+
+        # Không có chỉ số ảnh --> Chỉ BCE
+        if indices is None:
+            return loss
+
+        # Kiểm tra dữ liệu đầu vào
+        _check_loss_inputs("NVUMLoss", logits, targets)
+        if indices.numel() != logits.size(0):
+            raise ValueError(
+                "[NVUMLoss]: Số chỉ số ảnh phải bằng số ảnh của batch.\n"
+                f"Nhận được: indices = {indices.numel()}, batch = {logits.size(0)}"
+            )
+
+        # Tính ở FP32
+        logits = logits.float()
+
+        # Cập nhật bộ nhớ của các ảnh trong batch (không gradient)
+        with torch.no_grad():
+            memory = self.beta * self.memory[indices] + (1.0 - self.beta) * (logits - self.log_prior)
+            self.memory.index_copy_(0, indices, memory)
+
+        # Điều chuẩn: log(1 - sigmoid(t * p)) = logsigmoid(-t * p)
+        probability = torch.sigmoid(logits).clamp(1e-4, 1.0 - 1e-4)
+        regularizer = F.logsigmoid(-(memory * probability))
+
+        return loss + self.weight * regularizer.mean()
+
+# ============================================================
+# Bọc hàm Loss BCE bằng điều chuẩn NVUM theo config.NVUM = (weight, beta)
+# Trả về: (criterion, metadata)
+def build_nvum(criterion, metadata, name, train_df, classes):
+
+    # Kiểm tra giá trị
+    ## Chỉ dùng với hàm Loss "bce"
+    if name != "bce":
+        raise ValueError(
+            "[build_nvum]: config.NVUM chỉ dùng với hàm Loss 'bce'.\n"
+            f"Nhận được: name = {name!r}"
+        )
+
+    ## config.NVUM là (weight, beta) với weight > 0 và 0 <= beta < 1
+    try:
+        weight, beta = (float(value) for value in config.NVUM)
+    except (TypeError, ValueError):
+        raise ValueError(
+            "[build_nvum]: config.NVUM phải là (hệ số điều chuẩn, beta) hoặc None.\n"
+            f"Nhận được: NVUM = {config.NVUM!r}"
+        ) from None
+
+    if not (math.isfinite(weight) and weight > 0 and 0 <= beta < 1):
+        raise ValueError(
+            "[build_nvum]: Cần hệ số điều chuẩn > 0 và 0 <= beta < 1.\n"
+            f"Nhận được: NVUM = {config.NVUM!r}"
+        )
+
+    # Tần suất dương tính của từng lớp trên tập huấn luyện của Fold (build_BCEWithLogits đã kiểm tra mỗi lớp có mẫu dương và mẫu âm)
+    prior = train_df[list(classes)].to_numpy(dtype = np.float64).mean(axis = 0)
+
+    criterion = NVUMLoss(criterion, prior, len(train_df), weight, beta)
+    metadata  = {
+        **metadata,
+        "nvum": {"weight": weight, "beta": beta, "memory_source": "online_logits", "prior": prior.tolist()},
+    }
+
+    return criterion, metadata
 
 # ============================================================
 # Hàm Loss: BCEWithLogits

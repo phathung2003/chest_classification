@@ -229,6 +229,9 @@ def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler, 
     n_samples, accumulated_samples, amp_skipped_steps, data_wait_seconds = 0, 0, 0, 0.0
     truths, logit_batches, grad_norms = [], [], []
 
+    # Hàm Loss có bộ nhớ theo ảnh (NVUM): chỉ số ảnh của từng batch lấy từ thứ tự epoch của EpochSampler (loader giữ đúng thứ tự của sampler)
+    sample_order = torch.as_tensor(loader.sampler.indices(), dtype = torch.long, device = device) if getattr(criterion, "needs_indices", False) else None
+
     # Xóa gradient cũ
     optimizer.zero_grad(set_to_none = True)
 
@@ -252,7 +255,10 @@ def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler, 
         # Forward ở AMP (AMP_DTYPE), loss tính ở FP32
         with torch.autocast(device_type = device.type, dtype = amp_dtype(), enabled = bool(config.USE_AMP and device.type == "cuda")):
             logits = model(images)
-        loss = criterion(logits.float(), targets)
+        if sample_order is None:
+            loss = criterion(logits.float(), targets)
+        else:
+            loss = criterion(logits.float(), targets, sample_order[n_samples : n_samples + batch_size])    # n_samples: số ảnh của các batch trước
 
         # Backward: Cộng dồn gradient theo số mẫu (loss * batch_size), chia lại khi cập nhật --> trung bình theo mẫu
         scaler.scale(loss * batch_size).backward()

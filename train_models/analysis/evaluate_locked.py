@@ -39,6 +39,7 @@ import models.clis_mamba_v2 as v2
 import models.convnext_tiny as convnext
 import models.densenet121 as densenet
 import models.stitch_cxr as stx
+import models.stitch_cxr_s16 as s16
 import models.vmamba_cxr as vmx
 from training.evaluate import evaluate
 from utilities.data import create_dataloader, load_dataset, transform_setting
@@ -140,6 +141,12 @@ def build_model(settings, number_of_classes):
         return v2.CLISMambaV2(num_classes = number_of_classes, pretrained = False, **kwargs)
     if model_name.startswith(vmx.MODEL_NAME):                                  # VMamba-T CXR (models/vmamba_cxr.py): tuyến thêm dựng theo model_kwargs rồi nạp trọng số đã huấn luyện
         return vmx.VMambaCXR(num_classes = number_of_classes, pretrained = False, **{**kwargs, "grad_checkpoint": False})
+    if model_name.startswith("MambaVision-T CXR"):                             # Đối chứng MambaVision-T (models/mambavision_cxr.py); nạp muộn vì mã gốc cần mamba-ssm và einops
+        import models.mambavision_cxr as mvx
+        return mvx.MambaVisionCXR(num_classes = number_of_classes, pretrained = False, **{**kwargs, "grad_checkpoint": False})
+    if model_name.startswith(stx.MODEL_NAME) and f" {s16.VARIANT} " in model_name:  # ccmm bước 16 (models/stitch_cxr_s16.py): xét trước nhánh ccmm vì chung tiền tố tên
+        kwargs.pop("pinned_sha256", None)
+        return s16.StitchS16CXR(num_classes = number_of_classes, pretrained = False, **{**kwargs, "grad_checkpoint": False})
     if model_name.startswith(stx.MODEL_NAME):                                  # Mô hình lai ghép tầng (models/stitch_cxr.py): lớp nối đã huấn luyện nằm trong best_model.pt, không cần tệp lớp nối
         kwargs.pop("pinned_sha256", None)                                       # Mã đổi sau huấn luyện được phát hiện bằng bước kiểm chứng --split validation, không bằng SHA-256 đã ghim
         return stx.StitchCXR(num_classes = number_of_classes, pretrained = False, **{**kwargs, "grad_checkpoint": False})

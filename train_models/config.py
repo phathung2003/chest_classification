@@ -122,6 +122,7 @@ ASYMMETRIC_LOSS_GAMMA_NEGATIVE = 4.0                                            
 ASYMMETRIC_LOSS_GAMMA_POSITIVE = 0.0                                                                    # ASL (gamma_positive): gamma cho mẫu dương
 ASYMMETRIC_LOSS_CLIP        = 0.05                                                                      # ASL (clip): dịch xác suất mẫu âm (probability margin)
 ASYMMETRIC_LOSS_EPSILON     = 1e-8                                                                      # ASL: chặn dưới trước khi lấy log
+NVUM                        = None                                                                      # NVUM cho hàm Loss "bce" (training/loss.py): (hệ số điều chuẩn, hệ số bộ nhớ beta), ví dụ (1.0, 0.9); None = tắt (chữ ký các lượt cũ không đổi)
 
 # ============================================================
 # Cấu hình huấn luyện chung cho các mô hình

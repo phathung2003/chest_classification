@@ -308,9 +308,9 @@ class EpochSampler(Sampler):
     def __len__(self):
         return self.size
 
-    # Thứ tự ảnh của epoch hiện tại
-    # Trả về: Iterator các cặp (seed làm giàu ảnh, chỉ số ảnh)
-    def __iter__(self):
+    # Thứ tự ảnh và seed làm giàu ảnh của epoch hiện tại
+    # Trả về: (order, sample_seeds): order là hoán vị chỉ số ảnh, sample_seeds[index] là seed của ảnh index
+    def _draw(self):
 
         # Kiểm tra dữ liệu đầu vào
         ## Phải gọi set_epoch() trước khi duyệt
@@ -328,6 +328,18 @@ class EpochSampler(Sampler):
 
         # Sinh seed làm giàu ảnh của từng ảnh (cùng bộ sinh)
         sample_seeds = rng.integers(0, 2 ** 63 - 1, size = self.size)
+
+        return order, sample_seeds
+
+    # Chỉ số ảnh theo đúng thứ tự loader trả về trong epoch hiện tại (hàm Loss có bộ nhớ theo ảnh, ví dụ NVUM)
+    # Trả về: Mảng numpy [size]
+    def indices(self):
+        return self._draw()[0]
+
+    # Thứ tự ảnh của epoch hiện tại
+    # Trả về: Iterator các cặp (seed làm giàu ảnh, chỉ số ảnh)
+    def __iter__(self):
+        order, sample_seeds = self._draw()
 
         return iter([(int(sample_seeds[index]), int(index)) for index in order])
 
