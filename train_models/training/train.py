@@ -17,12 +17,23 @@ from training.checkpoint import check_checkpoint, reconcile_best, resume_trainin
 from training.ema import ModelEMA
 from training.evaluate import evaluate
 from training.loss import build_loss
-from training.optimizer import make_optimizer, make_scheduler
+from training.optimizer import STEP_SCHEDULERS, make_optimizer, make_scheduler
 from utilities.data import create_dataloader
 from utilities.file import load_torch, read_json, save_csv, save_json
 from utilities.log import GPUMonitor, progress_bar, update_progress
 from utilities.metric import class_metrics_dataframe, with_probabilities
-from utilities.setting import set_seed
+from utilities.setting import amp_dtype, set_seed
+
+# ============================================================
+# Tạm dừng có chủ đích sau PAUSE_AFTER_EPOCH epoch (không phải lỗi): last_checkpoint.pt đã lưu, chạy lại để tiếp tục
+# ** Mang điểm tốt nhất tới lúc dừng để hàng đợi xếp hạng các mức learning_rate (models/run_clis.py --halving)
+class TrainingPaused(Exception):
+
+    # Khởi tạo
+    def __init__(self, fold, epoch, best_score, best_epoch, selection_metric, higher_is_better):
+        super().__init__(f"Fold {fold} tạm dừng sau epoch {epoch} (PAUSE_AFTER_EPOCH). Tốt nhất: {selection_metric} = {best_score:.4f} ở epoch {best_epoch}")
+        self.fold, self.epoch, self.best_score, self.best_epoch = fold, epoch, best_score, best_epoch
+        self.selection_metric, self.higher_is_better = selection_metric, higher_is_better
 
 # ============================================================
 # Giải phóng bộ nhớ CPU / GPU giữa các Fold
@@ -32,7 +43,32 @@ def cleanup():
         torch.cuda.empty_cache()                                                # GPU: Trả bộ nhớ đệm của PyTorch
 
 # ============================================================
+# Giữ một phần bệnh nhân của tập huấn luyện (mọi ảnh của bệnh nhân được chọn)
+# ** Seed cố định, không theo SEED: Mọi mô hình, mọi seed và mọi mức learning_rate dùng chung một tập con
+# Trả về: DataFrame tập con (giữ thứ tự dòng)
+def subsample_patients(train_df, fraction, seed):
+
+    # Kiểm tra giá trị
+    ## fraction nằm trong khoảng (0, 1]
+    if not 0 < fraction <= 1:
+        raise ValueError(
+            "[subsample_patients]: TRAIN_PATIENT_FRACTION phải nằm trong khoảng (0, 1].\n"
+            f"Nhận được: TRAIN_PATIENT_FRACTION = {fraction}"
+        )
+
+    # Toàn bộ tập huấn luyện
+    if fraction == 1:
+        return train_df
+
+    # Chọn ngẫu nhiên round(fraction x số bệnh nhân) bệnh nhân (sắp xếp mã trước để kết quả không phụ thuộc thứ tự dòng)
+    patients = np.sort(train_df[config.PATIENT_ID_COLUMN].unique())
+    chosen = np.random.default_rng(int(seed)).choice(patients, size = max(1, round(fraction * len(patients))), replace = False)
+
+    return train_df.loc[train_df[config.PATIENT_ID_COLUMN].isin(chosen)].reset_index(drop = True)
+
+# ============================================================
 # Chia dữ liệu cho một Fold (Fold được chọn là Validation, các Fold còn lại là tập huấn luyện)
+# ** TRAIN_PATIENT_FRACTION < 1: Tập huấn luyện chỉ giữ một phần bệnh nhân, Validation giữ nguyên
 # Trả về: (train_df, validation_df)
 def split_fold(train_folds_df, fold):
 
@@ -47,6 +83,9 @@ def split_fold(train_folds_df, fold):
             f"[split_fold]: Không lấy được dữ liệu huấn luyện / kiểm thử cho Fold {fold}.\n"
             f"Nhận được: Huấn luyện = {len(train_df)} ảnh. Kiểm thử = {len(validation_df)} ảnh"
         )
+
+    # Giữ một phần bệnh nhân của tập huấn luyện (TRAIN_PATIENT_FRACTION = 1: giữ toàn bộ)
+    train_df = subsample_patients(train_df, float(config.TRAIN_PATIENT_FRACTION), config.TRAIN_PATIENT_SEED)
 
     return train_df, validation_df
 
@@ -66,19 +105,42 @@ def build_model_and_loss(experiment_context, train_df):
 # ============================================================
 # Khởi tạo optimizer, scheduler và GradScaler (AMP)
 # Trả về: (optimizer, scheduler hoặc None, scaler)
-def build_optimization(experiment_context, model, criterion):
+def build_optimization(experiment_context, model, criterion, steps_per_epoch):
 
-    # Tham số được tối ưu: Tham số mô hình và tham số học được của hàm Loss (nếu có)
-    parameters = list(model.parameters()) + [parameter for parameter in criterion.parameters() if parameter.requires_grad]
+    # Optimizer (tham số mô hình và tham số học được của hàm Loss, chia nhóm theo optimizer_config) và scheduler
+    optimizer = make_optimizer(model, criterion, experiment_context.training_config["optimizer"])
+    scheduler = make_scheduler(optimizer, experiment_context.training_config["scheduler"], steps_per_epoch, experiment_context.training_config["epochs"])
 
-    # Optimizer và scheduler
-    optimizer = make_optimizer(parameters, experiment_context.training_config["optimizer"])
-    scheduler = make_scheduler(optimizer, experiment_context.training_config["scheduler"])
-
-    # GradScaler (chỉ bật khi dùng AMP trên GPU)
-    scaler = torch.amp.GradScaler("cuda", enabled = bool(config.USE_AMP and experiment_context.device.type == "cuda"))
+    # GradScaler (chỉ cần cho AMP FP16 trên GPU; BF16 cùng dải số với FP32 nên không cần)
+    scaler = torch.amp.GradScaler("cuda", enabled = bool(config.USE_AMP and experiment_context.device.type == "cuda" and amp_dtype() == torch.float16))
 
     return optimizer, scheduler, scaler
+
+# ============================================================
+# Chuẩn L2 của toàn bộ gradient
+# ** torch < 2.6 (env WSL có kernel mamba-ssm dùng torch 2.4) chưa có get_total_norm: Dùng cùng công thức bằng phép toán foreach
+# Trả về: Tensor 0 chiều (giữ trên GPU)
+def total_gradient_norm(gradients):
+
+    # torch >= 2.6
+    if hasattr(torch.nn.utils, "get_total_norm"):
+        return torch.nn.utils.get_total_norm(gradients)
+
+    # torch < 2.6
+    return torch.linalg.vector_norm(torch.stack(torch._foreach_norm(gradients)))
+
+# ============================================================
+# Clip gradient theo chuẩn đã tính
+# ** torch < 2.6 chưa có clip_grads_with_norm_: Dùng cùng công thức bằng phép toán foreach
+# Trả về: None
+def clip_gradients_with_norm(parameters, max_norm, total_norm):
+
+    # torch >= 2.6
+    if hasattr(torch.nn.utils, "clip_grads_with_norm_"):
+        return torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm)
+
+    # torch < 2.6
+    torch._foreach_mul_([parameter.grad for parameter in parameters if parameter.grad is not None], torch.clamp(max_norm / (total_norm + 1e-6), max = 1.0))
 
 # ============================================================
 # Nạp trọng số tốt nhất của Fold (best_model.pt) vào mô hình
@@ -151,7 +213,7 @@ def is_improvement(score, best_score, has_best, higher_is_better, min_delta):
 # ============================================================
 # Huấn luyện một epoch
 # Trả về: dict thống kê của epoch (loss, accuracy, AUROC, thời gian, chuẩn gradient, số bước AMP bỏ qua)
-def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler, training_config, ema = None):
+def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler, training_config, ema = None, step_scheduler = None):
 
     # Lấy dữ liệu
     grad_accum_steps = int(training_config["grad_accum_steps"])                 # Số batch cộng dồn gradient trước mỗi lần cập nhật
@@ -187,8 +249,8 @@ def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler, 
         targets = targets.to(device, dtype = torch.float32, non_blocking = True)
         batch_size = images.size(0)
 
-        # Forward ở FP16 (AMP), loss tính ở FP32
-        with torch.autocast(device_type = device.type, dtype = torch.float16, enabled = bool(config.USE_AMP and device.type == "cuda")):
+        # Forward ở AMP (AMP_DTYPE), loss tính ở FP32
+        with torch.autocast(device_type = device.type, dtype = amp_dtype(), enabled = bool(config.USE_AMP and device.type == "cuda")):
             logits = model(images)
         loss = criterion(logits.float(), targets)
 
@@ -205,16 +267,22 @@ def train_one_epoch(epoch, device, model, loader, criterion, optimizer, scaler, 
             torch._foreach_div_(gradients, accumulated_samples)
 
             # Chuẩn gradient trước khi clip (đo sau unscale nên là giá trị thật)
-            grad_norm = torch.nn.utils.get_total_norm(gradients)
+            grad_norm = total_gradient_norm(gradients)
             if grad_clip_norm is not None:
-                torch.nn.utils.clip_grads_with_norm_(parameters, float(grad_clip_norm), grad_norm)
+                clip_gradients_with_norm(parameters, float(grad_clip_norm), grad_norm)
 
-            # Chuẩn không hữu hạn <=> có gradient tràn số FP16 <=> GradScaler bỏ qua bước cập nhật này
+            # Chuẩn không hữu hạn <=> có gradient tràn số <=> bỏ qua bước cập nhật này
+            # (FP16: GradScaler tự bỏ qua; BF16 / FP32 không có GradScaler nên bỏ qua tại đây)
             stepped = bool(torch.isfinite(grad_norm).item())
 
-            # Cập nhật trọng số và hệ số scale của AMP
-            scaler.step(optimizer)
+            # Cập nhật trọng số và hệ số scale của AMP (BF16 / FP32: Không gọi optimizer ở bước có gradient tràn số)
+            if stepped or scaler.is_enabled():
+                scaler.step(optimizer)
             scaler.update()
+
+            # Scheduler cập nhật sau mỗi bước tối ưu (warmup_cosine)
+            if step_scheduler is not None:
+                step_scheduler.step()
 
             # Bước cập nhật thật sự --> ghi chuẩn gradient và cập nhật EMA; bước bị bỏ qua --> đếm
             if stepped:
@@ -335,9 +403,11 @@ def train_one_fold(experiment_context, fold, train_folds_df):
     # 2. Khởi tạo (seed riêng cho từng Fold: Khởi tạo không phụ thuộc vào các Fold chạy trước)
     set_seed(int(config.SEED) + fold)
 
-    ## Mô hình, hàm Loss, optimizer, scheduler và GradScaler
+    ## Mô hình, hàm Loss, optimizer, scheduler và GradScaler (warmup_cosine cần số bước tối ưu mỗi epoch)
     model, criterion, loss_metadata = build_model_and_loss(experiment_context, train_df)
-    optimizer, scheduler, scaler = build_optimization(experiment_context, model, criterion)
+    steps_per_epoch = math.ceil(math.ceil(len(train_df) / experiment_context.batch_size) / training_config["grad_accum_steps"])
+    optimizer, scheduler, scaler = build_optimization(experiment_context, model, criterion, steps_per_epoch)
+    step_scheduler = scheduler if training_config["scheduler"]["name"] in STEP_SCHEDULERS else None
 
     ## EMA (Kiểm thử, early stopping, scheduler và best_model.pt đều dùng trọng số EMA)
     ema = ModelEMA(model, training_config["ema_decay"]) if training_config["ema_decay"] is not None else None
@@ -375,6 +445,11 @@ def train_one_fold(experiment_context, fold, train_folds_df):
 
     # 3. Vòng lặp epoch
     gpu_monitor = GPUMonitor.get() if experiment_context.device.type == "cuda" else None
+    pause_after = None if config.PAUSE_AFTER_EPOCH is None else int(config.PAUSE_AFTER_EPOCH)
+
+    ## Đã qua mốc tạm dừng từ lần chạy trước --> Tạm dừng ngay, không huấn luyện thêm
+    if pause_after is not None and not finished and epoch_start - 1 >= pause_after:
+        raise TrainingPaused(fold, epoch_start - 1, best_score, best_epoch, selection_metric, higher_is_better)
 
     for epoch in range(epoch_start, training_config["epochs"] + 1):
         if finished:
@@ -389,7 +464,7 @@ def train_one_fold(experiment_context, fold, train_folds_df):
 
         ## Huấn luyện
         train_loader.sampler.set_epoch(epoch)
-        train_stats = train_one_epoch(epoch, experiment_context.device, model, train_loader, criterion, optimizer, scaler, training_config, ema = ema)
+        train_stats = train_one_epoch(epoch, experiment_context.device, model, train_loader, criterion, optimizer, scaler, training_config, ema = ema, step_scheduler = step_scheduler)
 
         ## Đánh giá kiểm thử
         validation_started = time.perf_counter()
@@ -413,9 +488,9 @@ def train_one_fold(experiment_context, fold, train_folds_df):
             no_improvement += 1
         finished = no_improvement >= training_config["early_stop_patience"] or epoch >= training_config["epochs"]
 
-        ## Scheduler theo dõi cùng chỉ số với tiêu chí chọn mô hình ("lr": Tên khóa của torch trong param_groups)
+        ## Scheduler theo epoch (ReduceLROnPlateau) theo dõi cùng chỉ số với tiêu chí chọn mô hình; warmup_cosine đã cập nhật sau mỗi bước ("lr": Tên khóa của torch trong param_groups)
         learning_rate = optimizer.param_groups[0]["lr"]
-        if scheduler is not None:
+        if scheduler is not None and step_scheduler is None:
             scheduler.step(float(validation_loss) if training_config["scheduler"]["mode"] == "min" else auc)
         next_learning_rate = optimizer.param_groups[0]["lr"]
 
@@ -462,6 +537,10 @@ def train_one_fold(experiment_context, fold, train_folds_df):
         ## Cảnh báo khi mọi bước cập nhật của epoch đều bị AMP bỏ qua
         if not math.isfinite(train_stats["grad_norm_max"]):
             print("CẢNH BÁO: mọi bước cập nhật trong epoch đều bị AMP bỏ qua (gradient tràn số FP16)")
+
+        ## Tạm dừng sau PAUSE_AFTER_EPOCH epoch (checkpoint và mô hình tốt nhất đã lưu ở trên)
+        if pause_after is not None and not finished and epoch >= pause_after:
+            raise TrainingPaused(fold, epoch, best_score, best_epoch, selection_metric, higher_is_better)
 
     # Giải phóng DataLoader
     del train_loader, validation_loader

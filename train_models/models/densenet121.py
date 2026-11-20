@@ -37,6 +37,9 @@ dataset_class = NIHChestXrayDataset                                         # L�
 # Mô hình: DenseNet-121 --> ReLU --> GAP --> Linear
 class DenseNetBaseline(nn.Module):
 
+    # Khối dùng trọng số ImageNet (nhóm learning_rate backbone); còn lại là lớp mới
+    PRETRAINED_MODULES = ("cnn",)
+
     # Khởi tạo mô hình
     def __init__(self, num_classes):
         super().__init__()

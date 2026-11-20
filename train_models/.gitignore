@@ -220,4 +220,9 @@ __marimo__/
 # Pre-process Dataset
 /dataset/**
 /original_dataset/NIH_ChestXRay14/**
+/original_dataset/CheXmask/
+/original_dataset/ChestX-Det/
+/original_dataset/OpenI/
 /training_results/
+# Pretrained weights downloaded for models (e.g. VMamba-T, verified by SHA-256 in the model file)
+/pretrained/

@@ -1,0 +1,185 @@
+{
+ "n_files": 3955,
+ "rows": [
+  {
+   "label": "Pneumothorax",
+   "n_reports": 23,
+   "unilateral": 21,
+   "bilateral": 0,
+   "unspecified": 2,
+   "unilateral_frac_of_specified": 1.0,
+   "ci95": [
+    0.8453561767357979,
+    0.9999999999999999
+   ]
+  },
+  {
+   "label": "Effusion",
+   "n_reports": 161,
+   "unilateral": 77,
+   "bilateral": 74,
+   "unspecified": 10,
+   "unilateral_frac_of_specified": 0.5099337748344371,
+   "ci95": [
+    0.43094673205477657,
+    0.5884279062853078
+   ]
+  },
+  {
+   "label": "Mass",
+   "n_reports": 17,
+   "unilateral": 14,
+   "bilateral": 1,
+   "unspecified": 2,
+   "unilateral_frac_of_specified": 0.9333333333333333,
+   "ci95": [
+    0.7018292244757601,
+    0.9881334113938051
+   ]
+  },
+  {
+   "label": "Nodule",
+   "n_reports": 111,
+   "unilateral": 72,
+   "bilateral": 20,
+   "unspecified": 19,
+   "unilateral_frac_of_specified": 0.782608695652174,
+   "ci95": [
+    0.6879280920305373,
+    0.8546338017608852
+   ]
+  },
+  {
+   "label": "Consolidation",
+   "n_reports": 30,
+   "unilateral": 21,
+   "bilateral": 6,
+   "unspecified": 3,
+   "unilateral_frac_of_specified": 0.7777777777777778,
+   "ci95": [
+    0.5924270453692919,
+    0.8939290451059105
+   ]
+  },
+  {
+   "label": "Atelectasis",
+   "n_reports": 332,
+   "unilateral": 178,
+   "bilateral": 88,
+   "unspecified": 66,
+   "unilateral_frac_of_specified": 0.6691729323308271,
+   "ci95": [
+    0.6105730047420618,
+    0.7229559989400985
+   ]
+  },
+  {
+   "label": "Cardiomegaly",
+   "n_reports": 375,
+   "unilateral": 0,
+   "bilateral": 0,
+   "unspecified": 375,
+   "unilateral_frac_of_specified": null,
+   "ci95": [
+    null,
+    null
+   ]
+  },
+  {
+   "label": "Hernia",
+   "n_reports": 50,
+   "unilateral": 0,
+   "bilateral": 0,
+   "unspecified": 50,
+   "unilateral_frac_of_specified": null,
+   "ci95": [
+    null,
+    null
+   ]
+  },
+  {
+   "label": "Edema",
+   "n_reports": 46,
+   "unilateral": 0,
+   "bilateral": 8,
+   "unspecified": 38,
+   "unilateral_frac_of_specified": 0.0,
+   "ci95": [
+    0.0,
+    0.3244156195108769
+   ]
+  },
+  {
+   "label": "Emphysema",
+   "n_reports": 102,
+   "unilateral": 0,
+   "bilateral": 7,
+   "unspecified": 95,
+   "unilateral_frac_of_specified": 0.0,
+   "ci95": [
+    0.0,
+    0.35433884297520657
+   ]
+  },
+  {
+   "label": "Fibrosis",
+   "n_reports": 20,
+   "unilateral": 8,
+   "bilateral": 5,
+   "unspecified": 7,
+   "unilateral_frac_of_specified": 0.6153846153846154,
+   "ci95": [
+    0.35522480972268555,
+    0.8229055341876319
+   ]
+  },
+  {
+   "label": "Infiltration",
+   "n_reports": 65,
+   "unilateral": 42,
+   "bilateral": 16,
+   "unspecified": 7,
+   "unilateral_frac_of_specified": 0.7241379310344828,
+   "ci95": [
+    0.5979510037164683,
+    0.822477963192538
+   ]
+  },
+  {
+   "label": "Pneumonia",
+   "n_reports": 42,
+   "unilateral": 34,
+   "bilateral": 2,
+   "unspecified": 6,
+   "unilateral_frac_of_specified": 0.9444444444444444,
+   "ci95": [
+    0.8185502589238878,
+    0.9846303362329332
+   ]
+  },
+  {
+   "label": "Pleural_Thickening",
+   "n_reports": 47,
+   "unilateral": 23,
+   "bilateral": 17,
+   "unspecified": 7,
+   "unilateral_frac_of_specified": 0.575,
+   "ci95": [
+    0.42194800436059987,
+    0.7149083147518411
+   ]
+  },
+  {
+   "label": "(Edema + Pulmonary Congestion)",
+   "n_reports": 100,
+   "unilateral": 1,
+   "bilateral": 12,
+   "unspecified": 87,
+   "unilateral_frac_of_specified": 0.07692307692307693,
+   "ci95": [
+    0.013710066379696323,
+    0.3331453392824736
+   ]
+  }
+ ]
+}

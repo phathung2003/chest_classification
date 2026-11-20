@@ -45,6 +45,13 @@ def load_dataset():
     train_df = pd.read_csv(config.TRAIN_FOLDS_DIRECTORY)
     test_df = pd.read_csv(config.TEST_DIRECTORY)
 
+    # Đổi image_path sang bộ ảnh theo IMAGE_SIZE / IMAGE_VARIANT (cùng tên tệp)
+    ## image_path của notebook tiền xử lý trỏ tới images/ (kích thước image_size trong dataset_info.json)
+    directory = image_directory(dataset_config["image_size"])
+    if directory != "images":
+        for frame in (train_df, test_df):
+            frame["image_path"] = frame["image_path"].astype(str).str.replace(r"^images/", f"{directory}/", regex = True)
+
     # Kiểm tra dữ liệu
     validate_data(train_df, test_df, classes, number_of_folds)
 
@@ -52,6 +59,21 @@ def load_dataset():
     check_image_files(train_df, test_df)
 
     return train_df, test_df, name, classes, number_of_folds
+
+# ============================================================
+# Thư mục ảnh theo IMAGE_SIZE / IMAGE_VARIANT (tương đối theo DATASET_DIRECTORY)
+# - images/                              : Bộ ảnh của notebook tiền xử lý (kích thước base_size)
+# - images_<IMAGE_SIZE>/                 : preprocess/resize_images.py
+# - images_<IMAGE_SIZE>_<IMAGE_VARIANT>/ : Ví dụ images_512_aligned/ của preprocess/align_midline.py
+# Trả về: Tên thư mục
+def image_directory(base_size):
+
+    # Bộ ảnh biến thể (ví dụ đã căn đường giữa)
+    if config.IMAGE_VARIANT:
+        return f"images_{int(config.IMAGE_SIZE)}_{config.IMAGE_VARIANT}"
+
+    # Bộ ảnh gốc hoặc bộ ảnh đã resize
+    return "images" if int(config.IMAGE_SIZE) == int(base_size) else f"images_{int(config.IMAGE_SIZE)}"
 
 # ============================================================
 # Kiểm tra ảnh trong tập dữ liệu
@@ -76,9 +98,11 @@ def check_image_files(*frames):
     # Kiểm tra dữ liệu đầu vào
     ## Không được thiếu ảnh
     if missing_images:
+        create_command = (f"python preprocess/align_midline.py {config.IMAGE_SIZE} --chexmask <ChestX-Ray8.csv>" if config.IMAGE_VARIANT
+                          else f"python preprocess/resize_images.py {config.IMAGE_SIZE}")
         raise FileNotFoundError(
-            f"[check_image_files]: Thiếu ảnh trên đĩa. image_path phải là đường dẫn tương đối theo {config.DATASET_DIRECTORY} (dạng images/x.png); dữ liệu có đường dẫn tuyệt đối của máy khác thì chạy lại notebook tiền xử lý.\n"
-            f"Số ảnh bị thiếu: {len(missing_images):,}."
+            f"[check_image_files]: Thiếu ảnh trên đĩa. image_path phải là đường dẫn tương đối theo {config.DATASET_DIRECTORY} (dạng images/x.png); dữ liệu có đường dẫn tuyệt đối của máy khác thì chạy lại notebook tiền xử lý; bộ ảnh theo IMAGE_SIZE / IMAGE_VARIANT chưa tạo thì chạy {create_command}.\n"
+            f"Số ảnh bị thiếu: {len(missing_images):,}. Ảnh đầu tiên: {missing_images[0]}"
         )
 
     ## Kích thước ảnh phải bằng IMAGE_SIZE
@@ -197,9 +221,10 @@ def transform_setting():
     # Chuẩn hóa theo mean / std của ImageNet
     normalize = transforms.Normalize(mean = config.TRANSFORM_NORMALIZE_MEAN, std = config.TRANSFORM_NORMALIZE_STD)
 
-    # Làm giàu ảnh (Tập huấn luyện)
+    # Làm giàu ảnh (Tập huấn luyện). FLIP_CHANCE = 0: Không có bước lật ngang trong pipeline (giữ bất đối xứng giải phẫu trái / phải)
+    flip = [transforms.RandomHorizontalFlip(p = config.FLIP_CHANCE)] if config.FLIP_CHANCE > 0 else []
     train_transform = transforms.Compose([
-        transforms.RandomHorizontalFlip(p = config.FLIP_CHANCE),
+        *flip,
         transforms.RandomAffine(degrees = config.DEGREES, translate = config.TRANSLATE, scale = config.SCALE, fill = 0, interpolation = InterpolationMode.BILINEAR),
         transforms.ToTensor(),
         transforms.ColorJitter(brightness = config.BRIGHTNESS, contrast = config.CONTRAST),

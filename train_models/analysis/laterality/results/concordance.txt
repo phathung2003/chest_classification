@@ -1,0 +1,2 @@
+9 nhan: Spearman rho = 0.717, p (hoan vi chinh xac, mot phia) = 0.0184
+8 nhan, bo Emphysema: Spearman rho = 0.595, p (hoan vi chinh xac, mot phia) = 0.0661

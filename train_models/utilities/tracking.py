@@ -21,14 +21,16 @@ from torch.utils.flop_counter import FlopCounterMode
 
 import config
 from utilities.file import json_clean
+from utilities.setting import amp_dtype
 
 ROOT_DIRECTORY = Path(__file__).resolve().parents[1]                        # Thư mục huấn luyện (train_models)
 
 # Mã nguồn ảnh hưởng tới kết quả (Không gồm config.py: Giá trị cấu hình đã nằm trong settings, SELECTED_FOLD được phép đổi giữa các lần chạy tiếp)
 PIPELINE_SOURCE_FILES = ("training/*.py", "utilities/data.py", "utilities/dataset.py", "utilities/metric.py", "utilities/statistics.py", "utilities/setting.py")
 
-# Cài đặt trong config.py không đưa vào chữ ký
-CONFIG_EXCLUDED = {"ROOT_DIRECTORY", "ORIGINAL_DATASET_DIRECTORY", "DATASET_DIRECTORY", "FOLDS_DIRECTORY", "TRAIN_FOLDS_DIRECTORY", "TEST_DIRECTORY", "DATASET_INFO_DIRECTORY", "MODELS_OUTPUT_DIRECTORY", "TRAIN_ALL_FOLD", "SELECTED_FOLD", "RESUME_TRAINING", "REQUIRE_CLEAN_GIT", "NUMBER_OF_WORKERS", "PREFETCH_FACTOR", "PERSISTENT_WORKERS", "PROGRESS_SYNC_STEPS", "IMAGE_EXTENSION", "COMPARE_BOOTSTRAP_ITERATION", "INFERENCE_WARMUP_STEPS", "INFERENCE_TIMED_STEPS", "CONSOLE_WIDTH", "GPU_MONITOR_INTERVAL", "MIN_RESULT_WIDTH", "MIN_TITLE_WIDTH", "MIN_MESSAGE_WIDTH", "MIN_NUMBER_WIDTH", "EXPERIMENT_PROTOCOL"}
+# Cài đặt trong config.py không đưa vào chữ ký (BLOCK_GRAD_CHECKPOINT: Vào chữ ký qua model_kwargs của các biến thể CLIS-Mamba, mô hình khác không dùng;
+# CLIS_LR_MULTIPLIER: hệ số của mô hình đang chạy vào chữ ký qua training_config, sửa hệ số của mô hình khác không đổi chữ ký)
+CONFIG_EXCLUDED = {"ROOT_DIRECTORY", "ORIGINAL_DATASET_DIRECTORY", "DATASET_DIRECTORY", "FOLDS_DIRECTORY", "TRAIN_FOLDS_DIRECTORY", "TEST_DIRECTORY", "DATASET_INFO_DIRECTORY", "MODELS_OUTPUT_DIRECTORY", "TRAIN_ALL_FOLD", "SELECTED_FOLD", "RESUME_TRAINING", "PAUSE_AFTER_EPOCH", "BLOCK_GRAD_CHECKPOINT", "REQUIRE_CLEAN_GIT", "NUMBER_OF_WORKERS", "PREFETCH_FACTOR", "PERSISTENT_WORKERS", "PROGRESS_SYNC_STEPS", "IMAGE_EXTENSION", "COMPARE_BOOTSTRAP_ITERATION", "INFERENCE_WARMUP_STEPS", "INFERENCE_TIMED_STEPS", "CONSOLE_WIDTH", "GPU_MONITOR_INTERVAL", "MIN_RESULT_WIDTH", "MIN_TITLE_WIDTH", "MIN_MESSAGE_WIDTH", "MIN_NUMBER_WIDTH", "EXPERIMENT_PROTOCOL", "CLIS_CONFIG", "CLIS_PROTOCOL", "CLIS_LR_MULTIPLIER"}
 
 # ============================================================
 # Chụp mọi hằng số config.py ảnh hưởng tới kết quả
@@ -233,7 +235,7 @@ def environment_info():
         "python"    : sys.version.split()[0],
         "platform"  : platform.platform(),
         "packages"  : {name: version(name) for name in ("torch", "torchvision", "numpy", "pandas", "scikit-learn",
-                                                        "scipy", "pillow", "mambapy", "mamba-ssm")},
+                                                        "scipy", "pillow", "timm", "mambapy", "mamba-ssm")},
         "gpu"       : gpu,
     }
 
@@ -261,7 +263,9 @@ def model_specification(model_factory, classes, device, model_kwargs, batch_size
     # Đếm FLOPs của một lần forward (MACs = FLOPs / 2)
     with FlopCounterMode(display = False) as counter:
         model(input_tensor)
-    flops = int(counter.get_total_flops())
+    # Phép toán bộ đếm không thấy (kernel CUDA tự viết, ví dụ selective scan): mô hình tự khai báo qua uncounted_flops()
+    uncounted = int(model.uncounted_flops(config.IMAGE_SIZE, config.IMAGE_SIZE)) if hasattr(model, "uncounted_flops") else 0
+    flops = int(counter.get_total_flops()) + uncounted
 
     # Tổng hợp thông số
     specification = {
@@ -269,6 +273,7 @@ def model_specification(model_factory, classes, device, model_kwargs, batch_size
         "trainable_parameters"  : sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad),
         "macs"                  : flops // 2,
         "flops"                 : flops,
+        "uncounted_flops_added" : uncounted,
         **inference_speed(model, device, batch_size),
     }
 
@@ -295,7 +300,7 @@ def inference_speed(model, device, batch_size, warmup = None, repeats = None):
         timings = []
 
         # Chạy forward nhiều lần (đồng bộ GPU trước và sau mỗi lần để đo đúng thời gian)
-        with torch.autocast(device_type = device.type, dtype = torch.float16, enabled = use_amp):
+        with torch.autocast(device_type = device.type, dtype = amp_dtype(), enabled = use_amp):
             for step in range(warmup_steps + timed_steps):
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
@@ -313,7 +318,7 @@ def inference_speed(model, device, batch_size, warmup = None, repeats = None):
     batch_time = median_seconds(int(batch_size))
 
     return {
-        "inference_precision"               : "fp16 AMP" if use_amp else "fp32",
+        "inference_precision"               : f"{config.AMP_DTYPE} AMP" if use_amp else "fp32",
         "inference_latency_ms_batch_1"      : latency * 1000,
         "inference_batch_size"              : int(batch_size),
         "inference_images_per_second"       : int(batch_size) / batch_time,

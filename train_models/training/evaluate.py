@@ -16,6 +16,7 @@ from utilities.file import read_json, save_csv, save_json
 from training.threshold import apply_postprocess, load_postprocess
 from utilities.log import print_test_summary, progress_bar, update_progress
 from utilities.metric import calculate_metrics, class_metrics_dataframe, with_probabilities
+from utilities.setting import amp_dtype
 
 # ============================================================
 # Đánh giá mô hình
@@ -43,7 +44,7 @@ def evaluate(device, number_of_classes, model, loader, criterion = None, epoch =
         targets = targets.to(device, dtype = torch.float32, non_blocking = True)                    # Tensor chứa nhãn thực tế
 
         # Tạo Logits
-        with torch.autocast(device_type = device.type, dtype = torch.float16, enabled = bool(config.USE_AMP and device.type == "cuda")):  # Forward Pass với AMP (nếu bật AMP) ở FP16, loss tính ở FP32
+        with torch.autocast(device_type = device.type, dtype = amp_dtype(), enabled = bool(config.USE_AMP and device.type == "cuda")):  # Forward Pass với AMP (nếu bật AMP) ở AMP_DTYPE, loss tính ở FP32
             logits = model(images)
 
         # Chuyển Logits về FP32

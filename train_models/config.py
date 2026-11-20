@@ -20,7 +20,10 @@ MODELS_OUTPUT_DIRECTORY     = (ROOT_DIRECTORY / "training_results").resolve()   
 NUMBER_OF_FOLDS             = 5                                                                         # Số Fold khi chia dữ liệu (notebook tiền xử lý)
 TRAIN_ALL_FOLD              = False                                                                     # True: chạy đủ mọi Fold (bắt buộc cho kết quả chính thức)
 SELECTED_FOLD               = [1]                                                                       # Fold chạy khi TRAIN_ALL_FOLD = False
+TRAIN_PATIENT_FRACTION      = 1.0                                                                       # Tỉ lệ bệnh nhân của tập huấn luyện được giữ (Validation giữ nguyên); < 1: tinh chỉnh siêu tham số với ngân sách nhỏ
+TRAIN_PATIENT_SEED          = 2026                                                                      # Seed chọn tập con bệnh nhân (cố định, không theo SEED: mọi mô hình, seed và learning_rate dùng chung một tập con)
 IMAGE_SIZE                  = 224                                                                       # Kích thước ảnh đầu vào (ảnh đã resize sẵn)
+IMAGE_VARIANT               = None                                                                      # Bộ ảnh: None = images_<IMAGE_SIZE>/ (images/ ở kích thước gốc); "aligned" = images_<IMAGE_SIZE>_aligned/ đã căn đường giữa (preprocess/align_midline.py)
 IMAGE_EXTENSION             = {".png", ".jpg", ".jpeg"}                                                 # Định dạng ảnh hợp lệ
 
 # ============================================================
@@ -36,9 +39,12 @@ PERSISTENT_WORKERS          = True                                              
 EPOCHS                      = 100                                                                       # Số epoch tối đa
 LEARNING_RATE               = 0.0001                                                                    # Learning rate ban đầu
 WEIGHT_DECAY                = 0.0005                                                                    # Weight decay (mặc định cho AdamW)
+NEW_MODULE_LR_MULTIPLIER    = 1.0                                                                       # LR lớp mới (neck, khối trộn, đầu phân loại) = LEARNING_RATE x hệ số; backbone tiền huấn luyện (PRETRAINED_MODULES của mô hình) giữ LEARNING_RATE; 1.0 = một LR chung
 
 GRAD_CLIP_NORM              = None                                                                      # Ngưỡng clip gradient (ví dụ 1.0); None = không clip
-USE_AMP                     = True                                                                      # Huấn luyện mixed precision FP16 trên GPU
+USE_AMP                     = True                                                                      # Huấn luyện mixed precision trên GPU (kiểu AMP_DTYPE)
+AMP_DTYPE                   = "float16"                                                                 # Kiểu AMP: float16 (kèm GradScaler) | bfloat16 (cùng dải số với FP32, không cần GradScaler)
+BLOCK_GRAD_CHECKPOINT       = True                                                                      # Gradient checkpointing từng khối trộn token của CLIS-Mamba (tính lại forward khi backward): cùng phép tính, giảm VRAM, chậm hơn; vào chữ ký qua model_kwargs
 EMA_DECAY                   = 0.9995                                                                    # EMA trọng số: hệ số tối đa (khởi động (1 + n) / (10 + n)); Validation, chọn và lưu mô hình bằng trọng số EMA; None = tắt
 PATIENCE                    = 5                                                                         # Early stopping: số epoch không cải thiện tối đa
 MIN_DELTA                   = 0                                                                         # Early stopping: mức cải thiện tối thiểu
@@ -50,10 +56,12 @@ ADAM_EPSILON                = 1e-8                                              
 ADAM_FUSED                  = True                                                                      # Adam / AdamW: cập nhật mọi tham số trong một kernel (cùng thuật toán, nhanh hơn, không đồng bộ CPU / GPU khi dùng AMP)
 SGD_MOMENTUM                = 0.0                                                                       # SGD: momentum
 SGD_NESTEROV                = False                                                                     # SGD: dùng Nesterov momentum
-SCHEDULER_NAME              = "reduce_on_plateau"                                                       # Scheduler mặc định: reduce_on_plateau | none
+SCHEDULER_NAME              = "reduce_on_plateau"                                                       # Scheduler mặc định: reduce_on_plateau | warmup_cosine | none
 SCHEDULER_THRESHOLD         = 1e-4                                                                      # ReduceLROnPlateau: mức thay đổi tối thiểu được tính là cải thiện
+SCHEDULER_WARMUP_EPOCHS     = 1                                                                         # warmup_cosine: LR tăng tuyến tính trong số epoch này rồi giảm theo cosine về 0 ở epoch EPOCHS (cập nhật mỗi bước tối ưu)
 THRESHOLD                   = 0.5                                                                       # Ngưỡng mặc định để tính Precision/Recall/F1
 RESUME_TRAINING             = True                                                                      # Chạy tiếp lượt chạy dở nếu chữ ký cấu hình khớp
+PAUSE_AFTER_EPOCH           = None                                                                      # Tạm dừng Fold sau epoch này (checkpoint đã lưu, chạy lại để tiếp tục; loại dần mức learning_rate khi tinh chỉnh); None = không tạm dừng; không vào chữ ký
 
 # ============================================================
 # Tái lập kết quả
@@ -75,7 +83,7 @@ TRANSFORM_NORMALIZE_STD     = [0.229, 0.224, 0.225]                             
 
 # ============================================================
 # Đánh giá trên tập kiểm tra
-EVALUATE_FOLD_MODELS_ON_TEST = True                                                                     # Đánh giá mô hình tốt nhất của mỗi Fold, tổng hợp mean ± std và ensemble
+EVALUATE_FOLD_MODELS_ON_TEST = False                                                                     # Đánh giá mô hình tốt nhất của mỗi Fold, tổng hợp mean ± std và ensemble
 BOOTSTRAP_ITERATION         = 1000                                                                      # Số lần bootstrap theo bệnh nhân (khoảng tin cậy 95%); 0 = bỏ qua
 BOOTSTRAP_SEED              = 2024                                                                      # Seed của bootstrap
 PATIENT_ID_COLUMN           = "Patient ID"                                                              # Cột mã bệnh nhân dùng để bootstrap
@@ -125,6 +133,7 @@ EXPERIMENT_PROTOCOL = {
         "name"              : OPTIMIZER_NAME,
         "learning_rate"     : LEARNING_RATE,
         "weight_decay"      : WEIGHT_DECAY,
+        "new_module_lr_multiplier": NEW_MODULE_LR_MULTIPLIER,
     },
     "scheduler_config": {
         "name"              : SCHEDULER_NAME,
@@ -133,6 +142,49 @@ EXPERIMENT_PROTOCOL = {
         "patience"          : SCHEDULER_PATIENCE,
     },
     "selection_metric"      : SELECTION_METRIC,
+}
+
+# ============================================================
+# Giao thức CHUNG của nghiên cứu CLIS-Mamba (models/clis_mamba.py, models/run_clis.py) cho mọi mô hình được so sánh trong
+# nghiên cứu này: DenseNet121, ConvNeXt-T và các biến thể CLIS-Mamba. CLIS_CONFIG ghi đè các hằng số ở trên trước khi chạy
+# (utilities.setting.apply_config); CLIS_PROTOCOL thay cho EXPERIMENT_PROTOCOL. Giá trị thực tế vào chữ ký qua config / training_config.
+CLIS_CONFIG = {
+    "IMAGE_SIZE"            : 512,
+    "IMAGE_VARIANT"         : "aligned",            # Ảnh đã căn đường giữa cơ thể về giữa ảnh (mặt nạ phổi CheXmask)
+    "FLIP_CHANCE"           : 0.0,                  # Không lật ngang: giữ bất đối xứng giải phẫu trái / phải
+    "DEGREES"               : 7,
+    "TRANSLATE"             : (0.04, 0.04),
+    "SCALE"                 : (0.9, 1.1),
+    "EPOCHS"                : 20,
+    "PATIENCE"              : 4,
+    "BATCH_SIZE"            : 8,                    # Micro-batch
+    "GRAD_ACCUM_STEPS"      : 4,                    # Batch hiệu dụng 32
+    "GRAD_CLIP_NORM"        : 1.0,
+    "AMP_DTYPE"             : "bfloat16",
+    "ADAM_FUSED"            : True,                 # Fused AdamW: cùng thuật toán với foreach (lệch ở mức làm tròn float32), cần torch >= 2.5 (env mamba-t29); torch 2.4 (env mamba-main) lỗi với gradient conv theo kênh dạng channels-last: --set ADAM_FUSED=False
+    "BLOCK_GRAD_CHECKPOINT" : False,                # Không checkpointing 4 khối MetaFormer: 512 px batch 8 vừa VRAM (3,4 GB), nhanh hơn ~15%; độ phân giải cao hơn: đo VRAM (analysis/benchmark_clis.py) trước khi tắt
+    "EVALUATE_FOLD_MODELS_ON_TEST": False,          # Khóa tập Test tới cổng G3 (đăng ký trước kế hoạch phân tích)
+}
+CLIS_PROTOCOL = {
+    "loss_config"           : {"name": "bce", "pos_weight_alpha": 0.0},                                         # BCE không pos_weight
+    "optimizer_config"      : {"name": "adamw", "learning_rate": 1e-4, "weight_decay": 0.05, "new_module_lr_multiplier": 5.0, "no_weight_decay_1d": True},   # Backbone 1e-4; lớp mới 1e-4 x CLIS_LR_MULTIPLIER của mô hình (5.0: mức xuất phát của lưới tinh chỉnh)
+    "scheduler_config"      : {"name": "warmup_cosine", "warmup_epochs": 1},
+    "selection_metric"      : "macro_auroc",
+}
+
+# Hệ số LR lớp mới m* của từng mô hình (LR lớp mới = learning_rate x m*): chọn bằng tinh chỉnh loại dần trên 30% bệnh nhân, fold 1, seed 42
+# (prereg/lr_tuning_protocol.md; điểm trong training_results/clis_tuning/*_halving_*.json). models/run_clis.py dùng thay cho
+# new_module_lr_multiplier của CLIS_PROTOCOL khi không truyền --lr-multiplier. Giá trị thực tế vào chữ ký qua training_config
+CLIS_LR_MULTIPLIER = {
+    "densenet121"   : 10.0,                         # Validation macro AUROC 0.8231 (x20: 0.8206)
+    "convnext_t"    : 40.0,                         # 0.8238 (x20: 0.8230); biên trên của lưới {2, 5, 10, 20, 40}
+    "m_ras"         : 2.0,                          # 0.8134 (x5: 0.8092)
+    "m_clis"        : 2.0,                          # 0.8141 (x5: 0.8089)
+    "m_rand"        : 2.0,                          # 0.8147 (x5: 0.8091)
+    "m_clis4"       : 2.0,                          # Ablation E8: không tinh chỉnh riêng, giữ hệ số của m_clis
+    "gatedconv"     : 5.0,                          # 0.8064 (x20: 0.7960)
+    "attn"          : 2.0,                          # 0.8114 (x5: 0.8096)
+    "flipdiff"      : 1.0,                          # 0.8033 (x5: 0.8020); biên dưới của lưới {1, 2, 5, 10, 20}
 }
 
 # ============================================================

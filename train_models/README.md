@@ -16,6 +16,7 @@ Mọi lệnh trong tài liệu này chạy từ thư mục `train_models/`.
 8. [So sánh hai mô hình](#so-sánh-hai-mô-hình)
 9. [Thêm mô hình mới](#thêm-mô-hình-mới)
 10. [Xử lý sự cố](#xử-lý-sự-cố)
+11. [Nghiên cứu CLIS-Mamba (WSL2)](#nghiên-cứu-clis-mamba-wsl2)
 
 ## Cấu trúc thư mục
 
@@ -26,7 +27,9 @@ train_models/
 ├── worker_frefetch_benchmark.py  # Đo tốc độ DataLoader theo số worker / prefetch
 │
 ├── preprocess/
-│   └── nih_chestxray_14.ipynb    # Tiền xử lý: resize ảnh, chia Fold theo bệnh nhân, giữ tập Test chính thức
+│   ├── nih_chestxray_14.ipynb    # Tiền xử lý: resize ảnh, chia Fold theo bệnh nhân, giữ tập Test chính thức
+│   ├── resize_images.py          # Bộ ảnh ở kích thước khác (ví dụ 448) trong dataset/images_<kích thước>/, không đụng images/ và CSV; chọn bằng IMAGE_SIZE
+│   └── align_midline.py          # Căn đường giữa cơ thể bằng mặt nạ phổi CheXmask rồi resize: dataset/images_<kích thước>_aligned/; chọn bằng IMAGE_VARIANT = "aligned"
 │
 ├── models/                       # Mỗi tệp là một kiến trúc, chạy trực tiếp bằng python models/<tệp>.py
 │   ├── densenet121.py            # Baseline DenseNet-121 theo bài báo (ImageNet, GAP + Linear 14 lớp, không dropout)
@@ -34,7 +37,26 @@ train_models/
 │   ├── cnn_bimamba.py            # DenseNet-121 đa tỉ lệ + quét Mamba 2D + Class Query Head (có công tắc ablation)
 │   ├── cnn_mamba.py              # DenseNet-121 + Mamba
 │   ├── chexnet.py                # Tái hiện CheXNet theo bài báo (cấu hình riêng, không thuộc phép so sánh chung)
-│   └── run_all.py                # Hàng đợi huấn luyện bộ mô hình so sánh: mỗi (mô hình, Fold) một tiến trình con, tự chạy lại khi lỗi
+│   ├── run_all.py                # Hàng đợi huấn luyện bộ mô hình so sánh: mỗi (mô hình, Fold) một tiến trình con, tự chạy lại khi lỗi
+│   ├── clis_mamba.py             # CLIS-Mamba: ConvNeXt-T stage 1-3 + SS2D 4 tuyến (kernel mamba-ssm), biến thể m_ras, m_clis, m_rand, m_clis4, gatedconv, attn, flipdiff
+│   ├── convnext_tiny.py          # Baseline ConvNeXt-T đầy đủ (E1 của nghiên cứu CLIS)
+│   └── run_clis.py               # Hàng đợi nghiên cứu CLIS: giao thức CLIS_CONFIG / CLIS_PROTOCOL, nhiều seed, tiến trình con, tự chạy lại
+│
+├── analysis/
+│   ├── benchmark_clis.py         # VRAM đỉnh / thời gian một bước theo độ phân giải và micro-batch (cổng G0, E5)
+│   ├── compare_clis.py           # So sánh ghép cặp: trung bình qua seed, bootstrap theo bệnh nhân, nhóm L / C, tương tác ΔL - ΔC
+│   ├── compare_resolution.py     # Kiểm định H2 (E4): lợi thế của SSM so với GatedConv theo độ dài chuỗi
+│   ├── evaluate_locked.py        # Chấm checkpoint đã khóa trên Test một lần ở cổng G3; kiểm chứng đường chấm trên Validation
+│   └── laterality/               # Bằng chứng phân nhóm L / C (PPV, ChestX-Det, Open-i), kết quả kèm SHA-256
+│
+├── prereg/
+│   ├── analysis_plan.md          # Kế hoạch phân tích đăng ký trước của nghiên cứu CLIS (tag prereg-v1): giả thuyết, cổng, kịch bản
+│   └── lr_tuning_protocol.md     # Quy trình và kết quả chọn hệ số LR lớp mới m*
+│
+├── tests/
+│   ├── test_clis_mamba.py        # Cổng G0: hoán vị, kernel selective scan khớp bản tham chiếu, độc lập giữa các tuyến, số tham số, CAM, checkpointing
+│   ├── test_clis_protocol.py     # RLE CheXmask, căn đường giữa, không lật ngang, lịch LR warmup + cosine, nhóm không weight decay
+│   └── test_clis_analysis.py     # Kết luận H2, chọn tệp dự đoán theo seed, khóa Test ở cổng G3
 │
 ├── training/                     # Quy trình huấn luyện và đánh giá
 │   ├── experiment.py             # start_train(): điều phối toàn bộ thí nghiệm K-Fold
@@ -257,3 +279,38 @@ Cách đọc kết quả: nếu khoảng tin cậy 95% của hiệu không chứ
 | `ModuleNotFoundError: No module named 'mambapy'` | Chưa cài thư viện Mamba cho `cnn_mamba.py` / `cnn_bimamba.py` | `pip install mambapy` |
 | Huấn luyện đứng yên trên Windows | Bấm chuột vào cửa sổ console (QuickEdit) khi chạy ngoài `keep_system_awake()`, ví dụ trong IDE | Bấm Esc / Enter trong cửa sổ console |
 | Hàng đợi báo `LỖI ... mã thoát <n>` | Việc đó lỗi trong tiến trình con | Xem `run.log` của lượt chạy tương ứng |
+
+## Nghiên cứu CLIS-Mamba (WSL2)
+
+Biến thể SS2D cần kernel `selective_scan_cuda` của mamba-ssm, chỉ có trong WSL2: env conda `mamba-t29` (torch 2.9.1 + cu128, mamba-ssm 2.3.2.post1, các gói khác cùng phiên bản với env cũ). Env `mamba-main` (torch 2.4.0, mamba-ssm 2.2.2) giữ lại để tái lập các lượt tinh chỉnh đầu, cần `--set ADAM_FUSED=False`. Repo đọc trực tiếp từ `/mnt/e`. Mọi mô hình của nghiên cứu (DenseNet121, ConvNeXt-T, các biến thể CLIS-Mamba) dùng chung `CLIS_CONFIG` + `CLIS_PROTOCOL` trong `config.py`:
+
+- 512 px, ảnh đã căn đường giữa, không lật ngang;
+- micro-batch 8 × tích lũy 4, BF16, BCE;
+- AdamW (fused): backbone 1e-4, lớp mới 1e-4 × m* của từng mô hình (`CLIS_LR_MULTIPLIER`, chọn bằng tinh chỉnh loại dần trên 30% bệnh nhân), weight decay 0.05 (không áp dụng cho bias / norm / mã hóa vị trí / A_log, D, dt_bias);
+- không checkpointing 4 khối MetaFormer ở 512 px (`BLOCK_GRAD_CHECKPOINT = False`: cùng phép tính, nhanh hơn, VRAM 3,4 GB);
+- warmup 1 epoch rồi cosine, 20 epoch, patience 4;
+- Fold 1 làm Validation; tập Test bị khóa (`EVALUATE_FOLD_MODELS_ON_TEST = False`) tới cổng G3.
+
+```
+wsl -d Ubuntu-24.04
+conda activate mamba-t29
+cd "/mnt/e/New folder/chest_classification/train_models"
+
+python tests/test_clis_mamba.py              # Cổng G0: phải 0 lỗi, 0 bỏ qua
+python tests/test_clis_protocol.py
+python analysis/benchmark_clis.py            # VRAM / thời gian ở 512, 768, 1024 px --> chốt độ phân giải
+
+python preprocess/align_midline.py 512 --chexmask <CheXmask>/OriginalResolution/ChestX-Ray8.csv --check 50   # Kiểm quy ước RLE bằng mắt trước
+python preprocess/align_midline.py 512 --chexmask <CheXmask>/OriginalResolution/ChestX-Ray8.csv
+
+python models/run_clis.py densenet121 convnext_t --seeds 42 43 44 --min-score 0.82                # E1, cổng G1
+python models/run_clis.py m_clis m_rand m_ras gatedconv attn flipdiff --seeds 42 43 44             # E2 / E3 ở 512 px
+python preprocess/align_midline.py 1024 --chexmask <CheXmask>/OriginalResolution/ChestX-Ray8.csv   # Bộ ảnh 1024 px đã căn cho R*
+python models/run_clis.py m_clis m_rand m_ras --seeds 42 43 44 --init-from-size 512 --lr 5e-5 --set IMAGE_SIZE=1024 BATCH_SIZE=4 GRAD_ACCUM_STEPS=8 EPOCHS=5   # E3 ở R* = 1024 px
+python analysis/compare_clis.py --a "<m_clis>/run_*/fold_1/oof_predictions.csv" --b "<m_ras>/run_*/fold_1/oof_predictions.csv" --name-a M-clis --name-b M-ras
+python analysis/compare_resolution.py --ssm "<m_ras {size}px>/run_*/fold_1/oof_predictions.csv" --control "<gatedconv {size}px>/run_*/fold_1/oof_predictions.csv" --name-ssm M-ras   # H2 (E4)
+python analysis/evaluate_locked.py --runs "<lượt chạy>" --split validation --limit 256           # Kiểm chứng đường chấm, không mở Test
+python analysis/evaluate_locked.py --runs "<mọi lượt đã khóa>" --split test --confirm-g3         # Cổng G3: chấm Test một lần, cần tag prereg-v1
+```
+
+Không bật `EVALUATE_FOLD_MODELS_ON_TEST` để chấm Test: cờ này nằm trong chữ ký thí nghiệm nên sẽ tạo lượt chạy mới và huấn luyện lại. Giả thuyết, cổng quyết định và kịch bản diễn giải nằm trong [prereg/analysis_plan.md](prereg/analysis_plan.md).
