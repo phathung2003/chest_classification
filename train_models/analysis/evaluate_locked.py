@@ -5,13 +5,13 @@ và huấn luyện lại thay vì chấm checkpoint đã khóa. Script này khô
 
 Quy trình:
 1. Kiểm chứng, không mở Test: --split validation chấm lại Validation từ best_model.pt rồi so với oof_predictions.csv đã lưu. Chỉ in độ lệch xác suất, không in chỉ số.
-2. Cổng G3: --split test --confirm-g3, cần tag prereg-v1. Ghi SHA-256 của best_model.pt vào training_results/g3_manifest.json trước khi suy luận,
+2. Cổng G3: --split test --confirm-g3, cần tag prereg-v2 (thiết kế xác nhận v2, prereg/analysis_plan.md mục 8). Ghi SHA-256 của best_model.pt vào training_results/g3_manifest.json trước khi suy luận,
    lưu fold_<k>/test/test_predictions.csv, không in chỉ số. Sau đó phân tích bằng compare_clis.py và compare_resolution.py theo đúng kế hoạch.
    ** Tệp dự đoán đã có và checkpoint không đổi --> bỏ qua. Checkpoint đã đổi --> dừng, không chấm lại.
 
 Ví dụ:
     python analysis/evaluate_locked.py --runs "training_results/nih_chest_xray_14/densenet121_baseline_v1_clis_512px/run_1" --split validation --limit 256 --workers 2
-    python analysis/evaluate_locked.py --runs "training_results/nih_chest_xray_14/clismamba_v1_m_clis_1024px/run_*" --split test --confirm-g3
+    python analysis/evaluate_locked.py --runs "training_results/nih_chest_xray_14/convnextvmamba_cxr_ccmm_512px/run_[123]" --split test --confirm-g3
 """
 # Khai báo utilities
 import sys
@@ -50,7 +50,7 @@ from utilities.metric import with_probabilities
 from utilities.setting import apply_config, device_info
 from utilities.tracking import data_hash
 
-PREREG_TAG = "prereg-v1"
+PREREG_TAG = "prereg-v2"                                                    # Thiết kế xác nhận v2 (mục 8); prereg-v1 là thiết kế v1, không còn dùng để mở Test
 MANIFEST_PATH = config.MODELS_OUTPUT_DIRECTORY / "g3_manifest.json"
 MAX_PROBABILITY_DIFFERENCE = 1e-4                                            # Độ lệch tối đa khi chấm lại Validation (cùng trọng số, cùng ảnh; chỉ còn sai số làm tròn)
 
@@ -147,6 +147,10 @@ def build_model(settings, number_of_classes):
     if model_name.startswith(stx.MODEL_NAME) and f" {s16.VARIANT} " in model_name:  # ccmm bước 16 (models/stitch_cxr_s16.py): xét trước nhánh ccmm vì chung tiền tố tên
         kwargs.pop("pinned_sha256", None)
         return s16.StitchS16CXR(num_classes = number_of_classes, pretrained = False, **{**kwargs, "grad_checkpoint": False})
+    if model_name.startswith(stx.MODEL_NAME) and model_name.endswith(" in22k"):  # ccmm nhánh ImageNet-22k (models/run_in22k.py, prereg mục 8.8): CNN 22k, cùng kiến trúc
+        from models.run_in22k import StitchCXRIn22k
+        kwargs.pop("pinned_sha256", None)
+        return StitchCXRIn22k(num_classes = number_of_classes, pretrained = False, **{**kwargs, "grad_checkpoint": False})
     if model_name.startswith(stx.MODEL_NAME):                                  # Mô hình lai ghép tầng (models/stitch_cxr.py): lớp nối đã huấn luyện nằm trong best_model.pt, không cần tệp lớp nối
         kwargs.pop("pinned_sha256", None)                                       # Mã đổi sau huấn luyện được phát hiện bằng bước kiểm chứng --split validation, không bằng SHA-256 đã ghim
         return stx.StitchCXR(num_classes = number_of_classes, pretrained = False, **{**kwargs, "grad_checkpoint": False})
